@@ -1,6 +1,7 @@
 おじさん24時 で使っている素材
 
-■ 人物・動き（ojisan.glb、npc/ フォルダ）
+■ 人物・動き（ojisan.glb、head_jp.glb、npc/ フォルダ）
+  head_jp.glb は Male_Adult_09 の頭だけを取り出したもの（顔の絵は画面側で年を取らせて使う）
   Microsoft Rocketbox Avatar Library
   https://github.com/microsoft/Microsoft-Rocketbox
   MIT License（全文は LICENSE-Rocketbox.txt）
