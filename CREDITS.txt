@@ -1,0 +1,14 @@
+おじさん24時 で使っている素材
+
+■ 人物・動き（ojisan.glb、npc/ フォルダ）
+  Microsoft Rocketbox Avatar Library
+  https://github.com/microsoft/Microsoft-Rocketbox
+  MIT License（全文は LICENSE-Rocketbox.txt）
+
+■ 床・壁・布・道路の写真素材、映り込み用の写真（tex/ フォルダ）
+  Poly Haven  https://polyhaven.com  （CC0：表示義務なし）
+    laminate_floor_02, marble_01, large_floor_tiles_02, poly_wool_herringbone,
+    wool_boucle, cotton_jersey, asphalt_02, white_plaster_02,
+    HDRI: hotel_room, unfinished_office, phone_shop, potsdamer_platz
+  ambientCG  https://ambientcg.com  （CC0：表示義務なし）
+    Carpet012
