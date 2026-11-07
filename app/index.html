@@ -1472,6 +1472,7 @@ window.findDetourPoint = function(pos, target) {
   return best;
 };
 window.walkStep = function(ent, nextWp, speed, collide) {
+  if (!(speed > 1e-4)) return;
   var dx = nextWp.x - ent.pos.x, dz = nextWp.z - ent.pos.z, d = Math.hypot(dx, dz);
   var rawX = ent.pos.x + (dx / d) * speed, rawZ = ent.pos.z + (dz / d) * speed;
   var p = (collide && !(ent._ghost > 0)) ? window.resolveCollisionPosition(ent.pos.x, ent.pos.z, rawX, rawZ) : { x: rawX, z: rawZ };
@@ -4105,7 +4106,7 @@ window.updateCat3DAnimation = function(t) {
     if (dist > 0.08) {
       // 最後のひと区間（ソファ・ベッド・タワーに乗る）は当たり判定なし。引っかかったら回り道（logic.html の walkStep）
       var catCollide = c.pathQueue.length > 1 || (c.state !== 'sofa_nap' && c.state !== 'bed_sleep' && c.state !== 'climb_tower');
-      window.walkStep(c, nextWp, 0.036, catCollide);
+      window.walkStep(c, nextWp, 0.024 * (window.FRAME_SCALE || 1), catCollide);
       c.rotY = Math.atan2(dx, dz);
       cp.root.position.y = Math.abs(Math.sin(t * 14)) * 0.018;
       cp.head.rotation.set(0, 0, 0);
@@ -7426,10 +7427,16 @@ var clock = new THREE.Clock();
 // ============================================================================
 // 6. 60fps メインループ
 // ============================================================================
+// 歩く速さ（60fps の1フレームに進む m）：ふつう 0.021（約1.3m/秒）、あわてているとき 0.034（約2m/秒）
+var WALK_SPEED = 0.021, WALK_SPEED_PANIC = 0.034;
+var lastLoopT = null;
 function animateLoop() {
   requestAnimationFrame(animateLoop);
   var t = clock.getElapsedTime();
   var st = window.state;
+  // 1フレームの長さ（60fps を 1）。歩く速さを画面のなめらかさ（60Hz/144Hz など）に左右されないようにする
+  window.FRAME_SCALE = (lastLoopT === null) ? 1 : Math.max(0, Math.min(3, (t - lastLoopT) * 60));
+  lastLoopT = t;
 
   if (!window.RENDER_STARTED) {
     window.RENDER_STARTED = true;
@@ -7501,7 +7508,8 @@ function animateLoop() {
 
       if (dist > 0.09) {
         // 引っかかったら回り道（logic.html の walkStep）
-        window.walkStep(st, nextWp, 0.056, true);
+        var wSpd = (st.emotion === 'panic') ? WALK_SPEED_PANIC : WALK_SPEED;
+        window.walkStep(st, nextWp, wSpd * window.FRAME_SCALE, true);
         st.rotY = Math.atan2(dx, dz);
         st.pose = (st.handProp === 'vacuum') ? 'vacuum' : 'walk';
       } else {
