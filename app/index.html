@@ -1441,6 +1441,55 @@ window.resolveCollisionPosition = function(curX, curZ, nextX, nextZ) {
   return { x: finalX, z: finalZ };
 };
 
+// ----------------------------------------------------------------------------
+// 歩く1歩（おじさん・猫で共通）。家具や壁に引っかかって前に進めなくなったら：
+//   1) 引っかかった物の角を回る「回り道」の点を道の先頭に入れる（2回まで）
+//   2) それでもだめなら、少しの間だけ当たり判定なしで通り抜ける（その場で足踏みし続けないように）
+// ent：{ pos, pathQueue }、speed：1フレームに進む距離、collide：当たり判定を使うか
+// ----------------------------------------------------------------------------
+function segClear(ax, az, bx, bz, pad) {
+  var n = Math.max(2, Math.ceil(Math.hypot(bx - ax, bz - az) / 0.05));
+  for (var i = 0; i <= n; i++) {
+    var x = ax + (bx - ax) * i / n, z = az + (bz - az) * i / n;
+    for (var j = 0; j < window.COLLISION_BOXES.length; j++) {
+      var b = window.COLLISION_BOXES[j];
+      if (x > b.minX - pad && x < b.maxX + pad && z > b.minZ - pad && z < b.maxZ + pad) return false;
+    }
+  }
+  return true;
+}
+window.findDetourPoint = function(pos, target) {
+  var best = null, bestLen = Infinity, M = 0.32;
+  window.COLLISION_BOXES.forEach(function(b) {
+    [[b.minX - M, b.minZ - M], [b.maxX + M, b.minZ - M], [b.minX - M, b.maxZ + M], [b.maxX + M, b.maxZ + M]].forEach(function(c) {
+      if (c[0] < -7.6 || c[0] > 7.6 || c[1] < -4.6 || c[1] > 5.2) return;
+      if (!segClear(c[0], c[1], c[0], c[1], 0.05)) return;
+      if (!segClear(pos.x, pos.z, c[0], c[1], 0.02) || !segClear(c[0], c[1], target.x, target.z, 0.02)) return;
+      var len = Math.hypot(c[0] - pos.x, c[1] - pos.z) + Math.hypot(target.x - c[0], target.z - c[1]);
+      if (len < bestLen) { bestLen = len; best = { x: c[0], z: c[1] }; }
+    });
+  });
+  return best;
+};
+window.walkStep = function(ent, nextWp, speed, collide) {
+  var dx = nextWp.x - ent.pos.x, dz = nextWp.z - ent.pos.z, d = Math.hypot(dx, dz);
+  var rawX = ent.pos.x + (dx / d) * speed, rawZ = ent.pos.z + (dz / d) * speed;
+  var p = (collide && !(ent._ghost > 0)) ? window.resolveCollisionPosition(ent.pos.x, ent.pos.z, rawX, rawZ) : { x: rawX, z: rawZ };
+  if (ent._ghost > 0) ent._ghost--;
+  var nd = Math.hypot(nextWp.x - p.x, nextWp.z - p.z);
+  ent._stuck = (nd > d - speed * 0.25) ? (ent._stuck || 0) + 1 : 0;
+  ent.pos.x = p.x; ent.pos.z = p.z;
+  if (ent._stuck > 45) {
+    ent._stuck = 0;
+    ent._tries = (ent._tries || 0) + 1;
+    var det = ent._tries <= 2 ? window.findDetourPoint(ent.pos, nextWp) : null;
+    if (det) ent.pathQueue.unshift({ name: nextWp.name, x: det.x, z: det.z, rotY: nextWp.rotY, detour: true });
+    else ent._ghost = 90;
+  }
+};
+// 道の点に着いたとき：引っかかりの記録を消す
+window.walkArrived = function(ent) { ent._stuck = 0; ent._tries = 0; };
+
 window.WAYPOINTS = {
   living_hub:      { x: -0.2, z: 0.4,   rotY: 0 },
   living_west:     { x: -1.4, z: 0.8,   rotY: -Math.PI/2 },
@@ -1465,6 +1514,7 @@ window.WAYPOINTS = {
   sofa_main:       { x: 0.58, z: 2.20,  rotY: -Math.PI/2 },
   coffee_table:    { x: -0.05,z: 2.20,  rotY: -Math.PI/2 },
   cat_bowl_spot:   { x: 1.35, z: 3.45,  rotY: 0 },
+  sofa_end:        { x: 0.70, z: 3.95,  rotY: 0 },   // ソファの南のはしの外（ソファの背もたれを通らずに猫のお皿へ回る）
   cat_tower_spot:  { x: -1.65,z: 3.95,  rotY: -Math.PI/2 },
   balcony_spot:    { x: -1.5, z: 4.6,   rotY: 0 },
   laundry_pole:    { x: -2.4, z: 4.9,   rotY: 0 },
@@ -1491,7 +1541,7 @@ window.WAYPOINTS = {
 window.GRAPH_EDGES = [
   ['living_hub', 'living_west'], ['living_hub', 'indoor_dry_spot'], ['indoor_dry_spot', 'living_west'],
   ['living_west', 'sofa_main'], ['living_west', 'coffee_table'],
-  ['sofa_main', 'cat_bowl_spot'], ['living_west', 'cat_tower_spot'], ['cat_tower_spot', 'balcony_spot'],
+  ['sofa_main', 'sofa_end'], ['sofa_end', 'cat_bowl_spot'], ['living_west', 'cat_tower_spot'], ['cat_tower_spot', 'balcony_spot'],
   ['living_west', 'balcony_spot'], ['balcony_spot', 'laundry_pole'],
   ['living_hub', 'door_bed_e'], ['living_hub', 'door_hall_w'], ['living_hub', 'dining_hub'],
   ['living_hub', 'kitchen_west'], ['dining_hub', 'dining_chair'], ['dining_hub', 'door_hall_w'],
@@ -1522,14 +1572,17 @@ function findNearestSafeNode(x, z) {
   var inWestRoom = (x < -3.2);
   var inEastArea = (x > 3.2);
   var keys = Object.keys(window.WAYPOINTS);
+  // まっすぐ歩いて行ける（間に壁や家具がない）点を優先。なければいちばん近い点
+  var clearBest = null, clearDist = Infinity;
   for (var i = 0; i < keys.length; i++) {
     var name = keys[i];
     var wp = window.WAYPOINTS[name];
     if ((wp.x < -3.2) !== inWestRoom || (wp.x > 3.2) !== inEastArea) continue;
     var d = Math.hypot(wp.x - x, wp.z - z);
     if (d < minDist) { minDist = d; bestNode = name; }
+    if (d < clearDist && segClear(x, z, wp.x, wp.z, 0)) { clearDist = d; clearBest = name; }
   }
-  return bestNode;
+  return clearBest || bestNode;
 }
 
 window.findWaypointPath = function(startNode, goalNode, customStartPos) {
@@ -4050,16 +4103,9 @@ window.updateCat3DAnimation = function(t) {
     var dist = Math.hypot(dx, dz);
 
     if (dist > 0.08) {
-      var rawX = c.pos.x + (dx / dist) * 0.036;
-      var rawZ = c.pos.z + (dz / dist) * 0.036;
-      if (c.pathQueue.length > 1 || (c.state !== 'sofa_nap' && c.state !== 'bed_sleep' && c.state !== 'climb_tower')) {
-        var safe = window.resolveCollisionPosition(c.pos.x, c.pos.z, rawX, rawZ);
-        c.pos.x = safe.x;
-        c.pos.z = safe.z;
-      } else {
-        c.pos.x = rawX;
-        c.pos.z = rawZ;
-      }
+      // 最後のひと区間（ソファ・ベッド・タワーに乗る）は当たり判定なし。引っかかったら回り道（logic.html の walkStep）
+      var catCollide = c.pathQueue.length > 1 || (c.state !== 'sofa_nap' && c.state !== 'bed_sleep' && c.state !== 'climb_tower');
+      window.walkStep(c, nextWp, 0.036, catCollide);
       c.rotY = Math.atan2(dx, dz);
       cp.root.position.y = Math.abs(Math.sin(t * 14)) * 0.018;
       cp.head.rotation.set(0, 0, 0);
@@ -4069,7 +4115,7 @@ window.updateCat3DAnimation = function(t) {
     } else {
       c.pos.x = nextWp.x;
       c.pos.z = nextWp.z;
-      if (nextWp.name) c.currentNode = nextWp.name;
+      if (nextWp.name && !nextWp.detour) { c.currentNode = nextWp.name; window.walkArrived(c); }
       c.pathQueue.shift();
     }
   } else {
@@ -7076,7 +7122,7 @@ window.setCameraView = function(mode) {
     camAngleV = 1.48;
     camDist = isPortrait ? 25.5 : 21.0;
   }
-  else if (mode === 'overview') { camAngleH = -0.22; camAngleV = 0.72; camDist = isPortrait ? 22.0 : 16.5; }
+  else if (mode === 'overview') { camAngleH = -0.22; camAngleV = 0.78; camDist = isPortrait ? 22.0 : 16.5; }
   else if (mode === 'tv_watch') { camAngleH = 0.45; camAngleV = 0.36; camDist = 6.4; }
   else if (mode === 'kitchen') { camAngleH = 0.15; camAngleV = 0.46; camDist = 6.2; }
   else if (mode === 'bed_closeup') { camAngleH = 0.42; camAngleV = 0.54; camDist = 5.0; }
@@ -7088,6 +7134,62 @@ window.setCameraView = function(mode) {
     camDist = 2.35;
   }
 };
+
+// 斜め全景で画面に入れる家の範囲（外壁の外側とベランダまで。高さは壁の上の方まで）
+var HOUSE_MIN = new THREE.Vector3(-8.3, 0.0, -5.3), HOUSE_MAX = new THREE.Vector3(8.3, 2.4, 6.5);
+var HOUSE_CENTER = new THREE.Vector3(0.0, 0.6, 0.6);
+var fitCam = new THREE.PerspectiveCamera();
+var fitCache = { key: '', dist: 20, h: -0.22 };
+// 家の角 8 点がすべて画面の内側（はしに少し余白）に入る、いちばん近い距離
+// 90度回した向きでは東の外壁（高さ3.2m）が浴室・トイレを隠すので、その間だけ消す
+var eastWallParts = null;
+function setEastWallCutaway(on) {
+  if (!eastWallParts) {
+    if (!on) return;
+    eastWallParts = [];
+    var bb = new THREE.Box3();
+    window.scene.traverse(function(o) {
+      if (!o.isMesh) return;
+      bb.setFromObject(o); if (bb.isEmpty()) return;
+      if (bb.min.x > 7.6 && bb.max.x < 8.3 && bb.max.x - bb.min.x < 0.3 && bb.max.y - bb.min.y > 2.0 && bb.min.z > -5.4 && bb.max.z < 6.6) eastWallParts.push(o);
+    });
+  }
+  eastWallParts.forEach(function(o) { o.visible = !on; });
+}
+
+// 横向きの向き（-0.22）と、90度回した向き（縦長の画面向け：家の長い辺が上下になる）のうち、家が大きく映る方を使う
+var OVERVIEW_H = [-0.22, Math.PI / 2 - 0.22];
+function fitOverviewDist(target) {
+  var cam = window.camera;
+  var key = cam.aspect.toFixed(3) + '|' + cam.fov + '|' + camAngleV.toFixed(3);
+  if (fitCache.key === key) { camAngleH = fitCache.h; return fitCache.dist; }
+  var best = null;
+  OVERVIEW_H.forEach(function(h) {
+    camAngleH = h;
+    var d = fitOverviewDistFor(target, cam);
+    if (!best || d < best.dist) best = { h: h, dist: d };
+  });
+  camAngleH = best.h;
+  fitCache = { key: key, dist: best.dist, h: best.h };
+  return best.dist;
+}
+function fitOverviewDistFor(target, cam) {
+  fitCam.fov = cam.fov; fitCam.aspect = cam.aspect; fitCam.near = 0.1; fitCam.far = 200; fitCam.updateProjectionMatrix();
+  var corners = [];
+  for (var i = 0; i < 8; i++) corners.push(new THREE.Vector3(i & 1 ? HOUSE_MAX.x : HOUSE_MIN.x, i & 2 ? HOUSE_MAX.y : HOUSE_MIN.y, i & 4 ? HOUSE_MAX.z : HOUSE_MIN.z));
+  function fits(d) {
+    fitCam.position.set(target.x + Math.sin(camAngleH) * Math.cos(camAngleV) * d, target.y + Math.sin(camAngleV) * d, target.z + Math.cos(camAngleH) * Math.cos(camAngleV) * d);
+    fitCam.lookAt(target); fitCam.updateMatrixWorld(true);
+    for (var k = 0; k < 8; k++) {
+      var p = corners[k].clone().project(fitCam);
+      if (Math.abs(p.x) > 0.95 || Math.abs(p.y) > 0.95 || p.z > 1) return false;
+    }
+    return true;
+  }
+  var lo = 5, hi = 120;
+  for (var it = 0; it < 30; it++) { var mid = (lo + hi) / 2; if (fits(mid)) hi = mid; else lo = mid; }
+  return hi;
+}
 
 // logic.html の sendGift（ギフトの中身）を包み、カメラのギフト寄りだけをここで足す。
 // 読み込みが2回走っても二重に包まないよう、元の関数を一度だけ保存する。
@@ -7398,17 +7500,15 @@ function animateLoop() {
       var dist = Math.hypot(dx, dz);
 
       if (dist > 0.09) {
-        var rawNextX = st.pos.x + (dx / dist) * 0.056;
-        var rawNextZ = st.pos.z + (dz / dist) * 0.056;
-        var safePos = window.resolveCollisionPosition(st.pos.x, st.pos.z, rawNextX, rawNextZ);
-        st.pos.x = safePos.x;
-        st.pos.z = safePos.z;
+        // 引っかかったら回り道（logic.html の walkStep）
+        window.walkStep(st, nextWp, 0.056, true);
         st.rotY = Math.atan2(dx, dz);
         st.pose = (st.handProp === 'vacuum') ? 'vacuum' : 'walk';
       } else {
         st.pos.x = nextWp.x;
         st.pos.z = nextWp.z;
-        st.currentNode = nextWp.name;
+        var wasDetour = nextWp.detour;
+        if (!wasDetour) { st.currentNode = nextWp.name; window.walkArrived(st); }
         st.pathQueue.shift();
 
         if (st.passingDoorKey && st.doors && st.doors[st.passingDoorKey]) {
@@ -7416,7 +7516,7 @@ function animateLoop() {
           st.passingDoorKey = null;
         }
 
-        if (st.pathQueue.length > 0 && typeof window.checkDoorTransition === 'function') {
+        if (!wasDetour && st.pathQueue.length > 0 && typeof window.checkDoorTransition === 'function') {
           var upcomingNode = st.pathQueue[0].name;
           var targetDoorKey = window.checkDoorTransition(st.currentNode, upcomingNode);
           if (targetDoorKey && st.doors && st.doors[targetDoorKey] && !st.doors[targetDoorKey].open) {
@@ -7441,7 +7541,7 @@ function animateLoop() {
           st.handProp = activeStep.prop || 'none';
           var keepView = st.viewMode;
           if (typeof activeStep.onArrive === 'function') activeStep.onArrive();
-          if (keepView === 'top_down' || keepView === 'gift_closeup') {
+          if (keepView === 'top_down' || keepView === 'gift_closeup' || keepView === 'overview') {
             window.setCameraView(keepView);
           }
           window.updateHUDAndPanel();
@@ -7587,6 +7687,7 @@ function animateLoop() {
     window.camera.lookAt(0.0, 0.6, -0.5);
   }
   else if (st.viewMode === 'gift_closeup' || st.viewMode === 'front') {
+    setEastWallCutaway(false);
     var faceY = 1.42;
     if (st.pose === 'sit_chair' || st.pose === 'eat_chopsticks' || st.pose === 'watch_tv_laugh' || st.pose === 'use_remote' || st.pose === 'drive' || st.pose === 'work_phone' || st.pose === 'feed_churu') {
       faceY = 1.08;
@@ -7624,6 +7725,13 @@ function animateLoop() {
     else if (st.viewMode === 'sanitary') lookTarget.set(5.8, 0.8, 1.5);
     else if (st.viewMode === 'follow') lookTarget.set(window.ojisan.position.x, 1.15, window.ojisan.position.z);
 
+    // 斜め全景（家）：家ぜんぶ（壁の高さまで）が画面に入る距離を、画面の縦横比に合わせて毎回求める
+    var ovHome = (st.viewMode === 'overview' && st.cameraStage === 'HOME');
+    if (ovHome) {
+      lookTarget.copy(HOUSE_CENTER);
+      camDist = fitOverviewDist(lookTarget);
+    }
+    setEastWallCutaway(ovHome && camAngleH > 0.7);
     var cx = lookTarget.x + Math.sin(camAngleH) * Math.cos(camAngleV) * camDist;
     var cy = lookTarget.y + Math.sin(camAngleV) * camDist;
     var cz = lookTarget.z + Math.cos(camAngleH) * Math.cos(camAngleV) * camDist;
