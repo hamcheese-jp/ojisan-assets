@@ -7150,7 +7150,7 @@ function setEastWallCutaway(on) {
     eastWallParts = [];
     var bb = new THREE.Box3();
     window.scene.traverse(function(o) {
-      if (!o.isMesh) return;
+      if (!o.isMesh || o.userData.staticBatch) return;
       bb.setFromObject(o); if (bb.isEmpty()) return;
       if (bb.min.x > 7.6 && bb.max.x < 8.3 && bb.max.x - bb.min.x < 0.3 && bb.max.y - bb.min.y > 2.0 && bb.min.z > -5.4 && bb.max.z < 6.6) eastWallParts.push(o);
     });
@@ -7246,7 +7246,7 @@ var CLOSEUP_CANDIDATES = (function() {
 function closeupOccluders() {
   var list = [];
   window.scene.traverseVisible(function(o) {
-    if (!o.isMesh || o.isSkinnedMesh || o.isInstancedMesh) return;
+    if (!o.isMesh || o.isSkinnedMesh || o.isInstancedMesh || o.userData.staticBatch) return;
     var m = Array.isArray(o.material) ? o.material[0] : o.material;
     if (!m || (m.transparent && m.opacity < 0.6) || (m.transmission && m.transmission > 0.4)) return;
     for (var p = o; p; p = p.parent) { if (p === window.ojisan) return; }
@@ -7430,21 +7430,6 @@ var clock = new THREE.Clock();
 // 歩く速さ（60fps の1フレームに進む m）：ふつう 0.0105（約0.63m/秒）、あわてているとき 0.017（約1m/秒）
 var WALK_SPEED = 0.0105, WALK_SPEED_PANIC = 0.017;
 var lastLoopT = null, frameScaleSmooth = 1;
-// 画面を軽くする：35cm より小さい物（コップ・つまみ・小物）は影を落とさない（影の描画が半分近くになる）。
-// おじさん・猫・人（骨で動く物）はそのまま。あとから足された物にも効くよう、2秒ごとに新しい物だけ調べる
-var SMALL_SHADOW = 0.35, lastShadowTrim = -10;
-function trimSmallShadowCasters() {
-  var bb = new THREE.Box3(), sz = new THREE.Vector3();
-  window.scene.traverse(function(o) {
-    if (!o.isMesh || !o.castShadow || o.userData.shadowTrimmed) return;
-    o.userData.shadowTrimmed = true;
-    if (o.isSkinnedMesh || o.isInstancedMesh) return;
-    for (var p = o; p; p = p.parent) if (p === window.ojisan || p === window.cat3D) return;
-    bb.setFromObject(o); if (bb.isEmpty()) return;
-    bb.getSize(sz);
-    if (Math.max(sz.x, sz.y, sz.z) < SMALL_SHADOW) o.castShadow = false;
-  });
-}
 function animateLoop() {
   requestAnimationFrame(animateLoop);
   var t = clock.getElapsedTime();
@@ -7455,7 +7440,7 @@ function animateLoop() {
   frameScaleSmooth += (Math.min(rawScale, 2) - frameScaleSmooth) * 0.15;
   window.FRAME_SCALE = frameScaleSmooth;
   lastLoopT = t;
-  if (t - lastShadowTrim > 2) { lastShadowTrim = t; trimSmallShadowCasters(); }
+  window.FRAME_NO = (window.FRAME_NO || 0) + 1;
 
   if (!window.RENDER_STARTED) {
     window.RENDER_STARTED = true;
@@ -7777,6 +7762,422 @@ window.decideNextHomeSequence();
 window.setCameraView('top_down');
 window.updateHUDAndPanel();
 animateLoop();
+
+// ============================================================================
+// 7. 動かない物をまとめて描く（見た目はそのまま、描く回数を減らして軽くする）
+// ・家・会社・スーパー・車は細かい部品（箱など）が多く、1つずつ描くと描く回数が多すぎて重い
+// ・しばらく（STABLE 秒）動かない・消えない・色が変わらない部品を、見た目が同じ素材ごとに1つの形にまとめて描く。
+//   元の部品はそのまま残し、カメラから見えない層（31）に移すだけ（位置を調べる処理・当たり判定はそのまま使える）
+// ・毎フレーム、まとめた部品が動いた・消えた・素材が変わったかを調べ、変わったらすぐにまとめから外して元どおり1つで描く
+//   （ドアの開け閉め、アップのときに家具を消す、テレビの画面など）。また落ち着いたら、あとでまとめ直す
+// ・止めたいとき：OJISAN_STATIC.setEnabled(false)
+// ============================================================================
+(function() {
+  if (window.OJISAN_STATIC) return;
+  // STABLE：まとめるまでに動かないでいる秒数、PASS：調べ直す間隔（秒）、MAX_VERTS：1つのまとめの頂点数の上限、
+  // BUDGET_MS：1フレームでこの仕事に使ってよい時間
+  var SB = window.OJISAN_STATIC = { enabled: true, STABLE: 8, PASS: 3, MAX_VERTS: 10000, BUDGET_MS: 2, roots: [], stats: {} };
+  var HIDE = 31;
+
+  // 当たり判定（Raycaster）は、見えない層に移した元の部品にも当たるようにする
+  ['intersectObject', 'intersectObjects'].forEach(function(fn) {
+    var orig = THREE.Raycaster.prototype[fn];
+    if (!orig || orig.__sbWrapped) return;
+    var w = function() { if (this.layers && this.layers.enable) this.layers.enable(HIDE); return orig.apply(this, arguments); };
+    w.__sbWrapped = true;
+    THREE.Raycaster.prototype[fn] = w;
+  });
+
+  // ---- 見た目に関わる素材の中身（同じなら1つにまとめてよい）----
+  var SKIP_KEYS = { uuid: 1, name: 1, id: 1, version: 1, userData: 1, _listeners: 1, defines: 1 };
+  function matSig(m) {
+    var out = [];
+    for (var k in m) {
+      if (SKIP_KEYS[k] || k.charAt(0) === '_') continue;
+      var v = m[k];
+      if (v === null || v === undefined) out.push(k + ':-');
+      else if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') out.push(k + ':' + v);
+      else if (v.isColor) out.push(k + ':' + v.r.toFixed(5) + ',' + v.g.toFixed(5) + ',' + v.b.toFixed(5));
+      else if (v.isVector2) out.push(k + ':' + v.x + ',' + v.y);
+      else if (v.isTexture) out.push(k + ':' + v.uuid);
+      else if (typeof v === 'function') { if (k === 'onBeforeCompile' && v !== THREE.Material.prototype.onBeforeCompile) out.push(k + ':custom'); }
+      else out.push(k + ':obj');
+    }
+    return out.join('|');
+  }
+  function attrSig(g) {
+    return Object.keys(g.attributes).sort().map(function(k) { return k + g.attributes[k].itemSize; }).join(',');
+  }
+  // まとめてよい部品か
+  function eligible(o) {
+    if (!o.isMesh || o.isSkinnedMesh || o.isInstancedMesh || o.userData.staticBatch || o.userData.noMerge) return false;
+    var m = o.material, g = o.geometry;
+    if (!m || Array.isArray(m) || m.isShaderMaterial || m.transparent || m.opacity < 1) return false;
+    if (m.onBeforeCompile !== THREE.Material.prototype.onBeforeCompile) return false;
+    if (!g || !g.isBufferGeometry || !g.attributes.position || g.attributes.tangent) return false;
+    // 頂点の値は、ふつうの小数（Float32・正規化なし）だけ。そのまま写せる物に限る
+    for (var an in g.attributes) {
+      var at = g.attributes[an];
+      if (!at.isBufferAttribute || at.isInterleavedBufferAttribute || !(at.array instanceof Float32Array) || at.normalized) return false;
+    }
+    if (g.index && !(g.index.array instanceof Uint16Array || g.index.array instanceof Uint32Array)) return false;
+    if (g.morphAttributes && Object.keys(g.morphAttributes).length) return false;
+    if (g.drawRange.start !== 0 || g.drawRange.count !== Infinity) return false;
+    if (o.renderOrder !== 0 || o.onBeforeRender !== THREE.Object3D.prototype.onBeforeRender) return false;
+    if (o.layers.mask !== 1) return false;
+    // とても薄い物（画面・ポスター・絵の重ね・ラベルなど、1.2cm 未満）は、別の面にぴったり重ねてあることが多い。
+    // 描く順番で見え方が変わるので、まとめずに元のまま（まとめた形のあと）に描く
+    if (isThin(o)) return false;
+    return true;
+  }
+  function isThin(o) {
+    var g = o.geometry;
+    if (!g.boundingBox) g.computeBoundingBox();
+    g.boundingBox.getSize(thinV); o.getWorldScale(thinS);
+    return Math.min(thinV.x * Math.abs(thinS.x), thinV.y * Math.abs(thinS.y), thinV.z * Math.abs(thinS.z)) < 0.012;
+  }
+  var thinV = new THREE.Vector3(), thinS = new THREE.Vector3();
+
+  // ---- 変化を見張るための記録（毎フレーム使うので、新しい配列を作らずに a に書き込む）----
+  function nodeVals(o, a) {
+    a = a || []; a.length = 0;
+    a.push(o.parent, o.visible ? 1 : 0, o.position.x, o.position.y, o.position.z, o.quaternion.x, o.quaternion.y, o.quaternion.z, o.quaternion.w, o.scale.x, o.scale.y, o.scale.z);
+    if (!o.matrixAutoUpdate) for (var i = 0; i < 16; i++) a.push(o.matrix.elements[i]);
+    return a;
+  }
+  function meshVals(o, a) {
+    var m = o.material, g = o.geometry, pa = g.attributes.position;
+    a = a || []; a.length = 0;
+    a.push(m, m.version, m.visible ? 1 : 0, m.opacity, m.transparent ? 1 : 0, g, pa.version, g.index ? g.index.version : -1, o.castShadow ? 1 : 0, o.receiveShadow ? 1 : 0, o.layers.mask);
+    if (m.color) a.push(m.color.r, m.color.g, m.color.b);
+    if (m.emissive) a.push(m.emissive.r, m.emissive.g, m.emissive.b, m.emissiveIntensity);
+    if (m.map) a.push(m.map, m.map.version); else a.push(null);
+    if (m.emissiveMap) a.push(m.emissiveMap.version);
+    if (g.attributes.uv) a.push(g.attributes.uv.version);
+    if (g.attributes.color) a.push(g.attributes.color.version);
+    return a;
+  }
+  function same(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+  function chainOf(o, root) {
+    var c = [];
+    for (var p = o; p && p !== root; p = p.parent) c.push(p);
+    return (c.length && c[c.length - 1].parent === root) ? c : null;
+  }
+  function visibleIn(o, root) {
+    for (var p = o; p && p !== root; p = p.parent) if (!p.visible) return false;
+    return true;
+  }
+
+  // ---- 1つの場所（家・会社など）ごとの管理 ----
+  function addRoot(root) {
+    if (!root) return;
+    var br = new THREE.Group();
+    br.name = 'static_batches';
+    br.userData.staticBatch = true;
+    window.scene.add(br);
+    SB.roots.push({ root: root, br: br, batches: {}, members: new Map(), nodes: new Map(), cand: new Map(), keyCount: {} });
+  }
+
+  // まとめから外す（すぐ元の部品で描く）
+  function detach(R, o, changed) {
+    var info = R.members.get(o); if (!info) return;
+    // 変化して外れた回数（何度も変わる物は、まとめるまで長く待つ）。2分間変化がなければ数え直す
+    if (changed) {
+      var u = o.userData, tnow = performance.now() / 1000;
+      u.sbChanges = ((u.sbLastChange && tnow - u.sbLastChange > 120) ? 0 : (u.sbChanges || 0)) + 1;
+      u.sbLastChange = tnow;
+    }
+    R.members.delete(o);
+    o.layers.mask = info.mask;
+    var b = info.batch;
+    var idx = b.mesh.geometry.index;
+    for (var i = info.start; i < info.start + info.count; i++) idx.array[i] = 0;
+    idx.needsUpdate = true;
+    b.alive--; b.dirty = true;
+    info.chain.forEach(function(n) {
+      var rec = R.nodes.get(n); if (!rec) return;
+      var k = rec.members.indexOf(o); if (k >= 0) rec.members.splice(k, 1);
+      if (!rec.members.length) R.nodes.delete(n);
+    });
+    R.cand.delete(o);
+    SB.stats.detached = (SB.stats.detached || 0) + 1;
+  }
+
+  // 毎フレーム：まとめた部品に変化がないか
+  var scratch = [], bad = [];
+  function checkRoot(R) {
+    var root = R.root;
+    R.br.visible = root.visible && root.parent !== null;
+    R.br.position.copy(root.position); R.br.quaternion.copy(root.quaternion); R.br.scale.copy(root.scale);
+    if (!R.br.visible || !R.members.size) return;
+    bad.length = 0;
+    R.nodes.forEach(function(rec, n) {
+      if (!same(rec.vals, nodeVals(n, scratch))) for (var k = 0; k < rec.members.length; k++) bad.push(rec.members[k]);
+    });
+    R.members.forEach(function(info, o) {
+      if (!same(info.vals, meshVals(o, scratch))) bad.push(o);
+    });
+    for (var i = 0; i < bad.length; i++) detach(R, bad[i], true);
+  }
+
+  // まとめ直し（数秒ごと）：落ち着いた部品を集めて、素材ごとに1つの形にする
+  var tmpM = new THREE.Matrix4(), invRoot = new THREE.Matrix4(), nm = new THREE.Matrix3(), v3 = new THREE.Vector3();
+  function buildBatch(R, key, list, old) {
+    var root = R.root;
+    // 位置は前のフレームで描いたときのもの（まとめる部品は何秒も動いていないので、それで正しい）
+    invRoot.copy(root.matrixWorld).invert();
+    var names = Object.keys(list[0].geometry.attributes);
+    var nV = 0, nI = 0;
+    list.forEach(function(o) { var g = o.geometry; nV += g.attributes.position.count; nI += g.index ? g.index.count : g.attributes.position.count; });
+    var arrs = {};
+    names.forEach(function(n) { var a = list[0].geometry.attributes[n]; arrs[n] = new Float32Array(nV * a.itemSize); });
+    var index = (nV > 65535) ? new Uint32Array(nI) : new Uint16Array(nI);
+    var vo = 0, io = 0, ranges = [];
+    list.forEach(function(o) {
+      var g = o.geometry, pa = g.attributes.position, cnt = pa.count;
+      tmpM.multiplyMatrices(invRoot, o.matrixWorld);
+      nm.getNormalMatrix(tmpM);
+      var flip = tmpM.determinant() < 0;
+      names.forEach(function(n) {
+        var a = g.attributes[n], s = a.itemSize, dst = arrs[n];
+        for (var i = 0; i < cnt; i++) {
+          if (n === 'position') { v3.fromBufferAttribute(a, i).applyMatrix4(tmpM); dst[(vo + i) * 3] = v3.x; dst[(vo + i) * 3 + 1] = v3.y; dst[(vo + i) * 3 + 2] = v3.z; }
+          else if (n === 'normal') { v3.fromBufferAttribute(a, i).applyMatrix3(nm).normalize(); dst[(vo + i) * 3] = v3.x; dst[(vo + i) * 3 + 1] = v3.y; dst[(vo + i) * 3 + 2] = v3.z; }
+          else { for (var c = 0; c < s; c++) dst[(vo + i) * s + c] = a.array[i * s + c]; }
+        }
+      });
+      var start = io;
+      if (g.index) {
+        var ia = g.index.array, ic = g.index.count;
+        for (var t = 0; t < ic; t += 3) {
+          index[io++] = ia[t] + vo;
+          index[io++] = (flip ? ia[t + 2] : ia[t + 1]) + vo;
+          index[io++] = (flip ? ia[t + 1] : ia[t + 2]) + vo;
+        }
+      } else {
+        for (var t2 = 0; t2 < cnt; t2 += 3) {
+          index[io++] = vo + t2; index[io++] = vo + (flip ? t2 + 2 : t2 + 1); index[io++] = vo + (flip ? t2 + 1 : t2 + 2);
+        }
+      }
+      ranges.push([start, io - start]);
+      vo += cnt;
+    });
+    var geo = new THREE.BufferGeometry();
+    names.forEach(function(n) { var a = list[0].geometry.attributes[n]; geo.setAttribute(n, new THREE.BufferAttribute(arrs[n], a.itemSize, a.normalized)); });
+    geo.setIndex(new THREE.BufferAttribute(index, 1));
+    geo.computeBoundingSphere(); geo.computeBoundingBox();
+    var mat = old ? old.mesh.material : list[0].material.clone();
+    var mesh = new THREE.Mesh(geo, mat);
+    mesh.name = 'static_batch';
+    mesh.userData.staticBatch = true;
+    mesh.castShadow = list[0].castShadow; mesh.receiveShadow = list[0].receiveShadow;
+    mesh.matrixAutoUpdate = false;
+    // まとめた形は先に描く：同じ面にぴったり重ねた物（画面・ポスターなど）が、これまでどおり上に出るように
+    mesh.renderOrder = -1;
+    R.br.add(mesh);
+    if (old) { R.br.remove(old.mesh); old.mesh.geometry.dispose(); }
+    var b = { key: key, mesh: mesh, alive: list.length, dirty: false, verts: nV, list: list };
+    // 元の部品を見えない層へ。変化を見張る記録をつける
+    list.forEach(function(o, i) {
+      var chain = chainOf(o, root);
+      var prev = R.members.get(o);
+      var mask = prev ? prev.mask : o.layers.mask;
+      if (prev) R.members.delete(o);
+      o.layers.set(HIDE);
+      R.members.set(o, { batch: b, start: ranges[i][0], count: ranges[i][1], mask: mask, chain: chain, vals: meshVals(o) });
+      chain.forEach(function(n) {
+        var rec = R.nodes.get(n);
+        if (!rec) { rec = { vals: nodeVals(n), members: [] }; R.nodes.set(n, rec); }
+        if (rec.members.indexOf(o) < 0) rec.members.push(o);
+      });
+      R.cand.delete(o);
+    });
+    return b;
+  }
+
+  // ---- 重い処理は少しずつ（1フレーム SB.BUDGET_MS ミリ秒まで）進める。一度に全部やると画面が一瞬止まるため ----
+  // 素材の中身の文字列は作るのが重いので、20秒ごとに作り直す
+  var sigCache = new WeakMap();
+  function matSigCached(m, now) {
+    var c = sigCache.get(m);
+    if (!c || now - c.t > 20) { c = { sig: matSig(m), t: now }; sigCache.set(m, c); }
+    return c.sig;
+  }
+  // まとめる単位：同じ見た目の素材 × 8m 四方の場所（1か所が変わっても、その場所の分だけ作り直せばすむように）
+  function keyOf(o, sig) {
+    var e = o.matrixWorld.elements, cell = Math.floor(e[12] / 8) + ',' + Math.floor(e[14] / 8);
+    return sig + '#' + attrSig(o.geometry) + '#' + (o.castShadow ? 1 : 0) + (o.receiveShadow ? 1 : 0) + '#' + cell;
+  }
+  // 部品の形・素材・つながりの全部（落ち着いているかの判定用。素材の文字列はキャッシュを使う）
+  function candSnap(o, chain, now) {
+    var a = meshVals(o);
+    a.push(matSigCached(o.material, now));
+    chain.forEach(function(n) { Array.prototype.push.apply(a, nodeVals(n)); });
+    return a;
+  }
+  // 薄い物（絵・画面・ラベル・ポスターなど）が貼ってある物は、まとめない
+  // （ぴったり重なった面は描く順番で見え方が決まるので、元の順番のまま描く）。結果は20秒ごとに調べ直す
+  //  薄い物の箱は、調べる途中で少しずつ集め、調べ終わったら入れ替える（前の回の箱で判定する）
+  var cb = new THREE.Box3();
+  function touchesThin(R, o, now) {
+    var u = o.userData;
+    if (u.sbThinT && u.sbThinGen === R.thinGen && now - u.sbThinT < 20) return u.sbThinRes;
+    cb.setFromObject(o);
+    var res = false, tb = R.thinBoxes || [];
+    for (var i = 0; i < tb.length; i++) if (tb[i].intersectsBox(cb)) { res = true; break; }
+    u.sbThinT = now; u.sbThinRes = res; u.sbThinGen = R.thinGen;
+    return res;
+  }
+
+  // 調べる順番の表を作る（数秒ごと）
+  function startScan(R, now) {
+    var root = R.root;
+    R.lastScan = now;
+    if (!root.visible || !root.parent) return;
+    var list = [];
+    root.traverse(function(o) { if (o.isMesh && !o.userData.staticBatch && !R.members.has(o)) list.push(o); });
+    R.scan = { list: list, i: 0, ready: {}, thin: [] };
+  }
+  // 1つの部品を調べる：落ち着いていれば「まとめてよい」に入れる
+  function scanOne(R, o, now) {
+    var root = R.root, sc = R.scan;
+    var g = o.geometry;
+    if (g && g.attributes && g.attributes.position && visibleIn(o, root) && isThin(o)) {
+      sc.thin.push(new THREE.Box3().setFromObject(o).expandByScalar(0.004));
+      R.cand.delete(o); return;
+    }
+    if (R.members.has(o) || !eligible(o) || !visibleIn(o, root)) { R.cand.delete(o); return; }
+    var chain = chainOf(o, root); if (!chain) { R.cand.delete(o); return; }
+    var snap = candSnap(o, chain, now), c = R.cand.get(o);
+    if (!c || !same(c.snap, snap)) { R.cand.set(o, { snap: snap, since: now }); return; }
+    // 何度も変わる物ほど長く待つ（8秒・40秒・72秒・104秒）。2分間変化がなければふつうに戻る
+    var u = o.userData, nCh = (u.sbLastChange && now - u.sbLastChange > 120) ? 0 : Math.min(3, u.sbChanges || 0);
+    if (now - c.since < SB.STABLE * (1 + 4 * nCh)) return;
+    if (touchesThin(R, o, now)) return;
+    var key = keyOf(o, matSigCached(o.material, now));
+    (sc.ready[key] = sc.ready[key] || []).push(o);
+  }
+  // 調べ終わったら、作り直す素材を順番待ちに入れる
+  function finishScan(R) {
+    var keys = {};
+    Object.keys(R.scan.ready).forEach(function(k) { keys[k] = 1; });
+    Object.keys(R.batches).forEach(function(bk) { if (R.batches[bk].dirty) keys[R.batches[bk].key] = 1; });
+    R.readyByKey = R.scan.ready;
+    R.buildQueue = Object.keys(keys);
+    // 薄い物の箱を入れ替える。数が変わったら、貼ってあるかどうかの記録を調べ直す
+    if (!R.thinBoxes || R.thinBoxes.length !== R.scan.thin.length) R.thinGen = (R.thinGen || 0) + 1;
+    R.thinBoxes = R.scan.thin;
+    R.scan = null;
+  }
+  // 1つの素材のまとめを作り直す
+  function buildKey(R, key, now) {
+    var root = R.root;
+    {
+      // この素材の、今まとまっている部品＋新しく落ち着いた部品（作る直前にもう一度確かめる）
+      var bks = Object.keys(R.batches).filter(function(bk) { return R.batches[bk].key === key; });
+      var all = [];
+      bks.forEach(function(bk) { R.batches[bk].list.forEach(function(o) { if (R.members.has(o) && R.members.get(o).batch === R.batches[bk]) all.push(o); }); });
+      ((R.readyByKey && R.readyByKey[key]) || []).forEach(function(o) {
+        if (R.members.has(o) || !eligible(o) || !visibleIn(o, root) || !chainOf(o, root)) return;
+        if (keyOf(o, matSigCached(o.material, now)) !== key) return;   // 素材がいつのまにか変わっていたら、次の機会に
+        all.push(o);
+      });
+      // 大きすぎないように分ける（作り直すときに一瞬止まらないように）
+      var groups = [], cur = [], cv = 0;
+      all.forEach(function(o) {
+        var n = o.geometry.attributes.position.count;
+        if (cur.length && cv + n > SB.MAX_VERTS) { groups.push(cur); cur = []; cv = 0; }
+        cur.push(o); cv += n;
+      });
+      if (cur.length) groups.push(cur);
+      var oldBatches = bks.map(function(bk) { return R.batches[bk]; });
+      bks.forEach(function(bk) { delete R.batches[bk]; });
+      var reuseMat = oldBatches.length ? oldBatches[0].mesh.material : null;
+      groups.forEach(function(gl, gi) {
+        // 1つだけならまとめる意味がない。元のまま描く
+        if (gl.length < 2) return;
+        var b = buildBatch(R, key, gl, null);
+        if (reuseMat) { b.mesh.material.dispose(); b.mesh.material = reuseMat; }
+        R.batches[key + '@' + gi + '@' + now] = b;
+      });
+      oldBatches.forEach(function(ob) {
+        R.br.remove(ob.mesh); ob.mesh.geometry.dispose();
+        if (ob.mesh.material !== reuseMat) ob.mesh.material.dispose();
+      });
+      // まとまらなかった（1つだけ残った）元の部品は、元の層に戻す
+      var liveBatches = Object.keys(R.batches).map(function(bk) { return R.batches[bk]; });
+      all.forEach(function(o) {
+        var info = R.members.get(o);
+        if (info && liveBatches.indexOf(info.batch) < 0) detach(R, o);
+      });
+    }
+  }
+
+  function stats() {
+    var s = { batches: 0, members: 0, nodes: 0 };
+    SB.roots.forEach(function(R) { s.batches += Object.keys(R.batches).length; s.members += R.members.size; s.nodes += R.nodes.size; });
+    s.detached = SB.stats.detached || 0;
+    return s;
+  }
+  SB.getStats = stats;
+
+  var lastFrame = -1;
+  // 調整用：仕事ごとの、いちばん長くかかった時間（ミリ秒）
+  SB.stats.maxMs = {};
+  function noteTime(k, t0) { var d = performance.now() - t0; if (!(SB.stats.maxMs[k] >= d)) SB.stats.maxMs[k] = +d.toFixed(1); }
+  SB.prepare = function() {
+    if (!SB.enabled) return;
+    // 変化の確認は描くたびに（1フレームに2回描くこともあるので、その間の変化も見のがさない）
+    var tc = performance.now();
+    for (var i = 0; i < SB.roots.length; i++) checkRoot(SB.roots[i]);
+    noteTime('check', tc);
+    // まとめる仕事は1フレームに1回
+    if (window.FRAME_NO === lastFrame) return;
+    lastFrame = window.FRAME_NO;
+    // 残りの仕事（作り直し → 調べる → 次の調べを始める）を、決まった時間の中で少しずつ
+    var t0 = performance.now(), deadline = t0 + SB.BUDGET_MS, now = t0 / 1000;
+    for (var j = 0; j < SB.roots.length; j++) {
+      var R = SB.roots[j];
+      if (R.buildQueue && R.buildQueue.length) {
+        // 作り直しは1フレームに1素材まで（それ以上は次のフレームへ）
+        buildKey(R, R.buildQueue.shift(), now);
+        noteTime('build', t0);
+        return;
+      }
+      if (R.scan) {
+        var sc = R.scan;
+        while (sc.i < sc.list.length && performance.now() < deadline) scanOne(R, sc.list[sc.i++], now);
+        if (sc.i >= sc.list.length) finishScan(R);
+        noteTime('scan', t0);
+        if (performance.now() >= deadline) return;
+      } else if (!R.lastScan || now - R.lastScan >= SB.PASS) {
+        startScan(R, now);
+        noteTime('start', t0);
+        return;
+      }
+    }
+  };
+  SB.setEnabled = function(on) {
+    SB.enabled = !!on;
+    SB.roots.forEach(function(R) { R.scan = null; R.buildQueue = []; R.readyByKey = null; R.lastScan = 0; });
+    if (!on) SB.roots.forEach(function(R) {
+      Array.from(R.members.keys()).forEach(function(o) { detach(R, o); });
+      Object.keys(R.batches).forEach(function(bk) { R.br.remove(R.batches[bk].mesh); R.batches[bk].mesh.geometry.dispose(); });
+      R.batches = {};
+    });
+  };
+
+  addRoot(window.homeGroup); addRoot(window.officeGroup); addRoot(window.superGroup); addRoot(window.carGroup);
+  var baseRender = window.renderer.render;
+  window.renderer.render = function(sc, cam) {
+    if (sc === window.scene) { try { SB.prepare(); } catch (e) { console.warn('static batch', e); SB.setEnabled(false); } }
+    return baseRender.apply(this, arguments);
+  };
+})();
 </script>
 <script>
 // ============================================================================
@@ -7873,7 +8274,8 @@ animateLoop();
   function swapAll() {
     var count = 0;
     window.scene.traverse(function(o) {
-      if (!o.isMesh || !o.material || Array.isArray(o.material)) return;
+      // まとめて描く形（room3d.html の 7.）は、元の部品が変われば作り直されるので触らない
+      if (!o.isMesh || !o.material || Array.isArray(o.material) || o.userData.staticBatch) return;
       var mat = o.material;
       var key = mat.map && mat.map.name && SETS[mat.map.name] ? mat.map.name : (isWall(o, mat) ? 'wall' : null);
       if (!key || !P.loaded[key]) return;
@@ -8457,7 +8859,7 @@ animateLoop();
   function findMesh(x, y, z, test) {
     var hit = null;
     window.scene.traverse(function(o) {
-      if (hit || !(o.isMesh || o.isGroup)) return;
+      if (hit || !(o.isMesh || o.isGroup) || o.userData.staticBatch) return;
       var p = o.position;
       if (Math.abs(p.x - x) < 0.02 && Math.abs(p.y - y) < 0.02 && Math.abs(p.z - z) < 0.02 && (!test || test(o))) hit = o;
     });
@@ -10727,7 +11129,7 @@ animateLoop();
   var aniso = window.goldAnisoPBR;
   if (aniso && window.scene) {
     window.scene.traverse(function(o) {
-      var m = o.isMesh && o.material;
+      var m = o.isMesh && !o.userData.staticBatch && o.material;
       if (!m || (m.bumpMap !== aniso.bump && m.roughnessMap !== aniso.roughnessMap)) return;
       m.bumpMap = null; m.roughnessMap = null;
       m.roughness = 0.3; m.metalness = Math.min(m.metalness, 0.75);
