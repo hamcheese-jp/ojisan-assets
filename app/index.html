@@ -12315,7 +12315,7 @@ animateLoop();
 // face.html - おじさんの顔を日本人らしいおじさんの顔に付け替える
 // ・Rocketbox の Male_Adult_09（東アジア系）の頭だけを入れた head_jp.glb（ojisan.glb と同じ場所）を読み込み、
 //   おじさんの骨に付け直して、元の頭は隠す（体・動き・服はそのまま）
-// ・顔の絵に手を入れて年を取らせる：白髪まじりの短髪、薄くなった頭頂と後退した生え際、額・目じりのしわ、ほうれい線、
+// ・顔の絵に手を入れて年を取らせる：金髪の短髪（横とえり足は刈り上げ）、少しだけ後退した生え際、額・目じりのしわ、ほうれい線、
 //   目の下のたるみ、ひげの剃り跡
 // ・手の肌の色を新しい顔の色に合わせる（outfits.html）
 // ============================================================================
@@ -12323,7 +12323,8 @@ animateLoop();
   if (typeof THREE === 'undefined' || window.OJISAN_FACE) return;
   // PONY_DIST：頭の骨からこれより離れている髪の束の三角形を消す（m）
   // PONY_DIST：頭の骨からこれより離れている髪の束の三角形を消す（m）。束は頭に近いので 0 で全部消す（根元の穴はふたでふさぐ）
-  var FC = window.OJISAN_FACE = { PONY_DIST: 0 };
+  // TAN：日焼けの色の掛け算（赤・緑・青）。SHAPE：丸顔・二重あごの強さ（0 で元の形）
+  var FC = window.OJISAN_FACE = { PONY_DIST: 0, TAN: [0.93, 0.84, 0.74], SHAPE: 1 };
 
   function waitReal(cb) {
     var R = window.OJISAN_REAL;
@@ -12345,6 +12346,12 @@ animateLoop();
   function rnd(i) { var x = Math.sin(i * 12.9898) * 43758.5453; return x - Math.floor(x); }
   FC.paint = function(c, S) {
     var im = c.getImageData(0, 0, S, S), d = im.data;
+    // 少し日焼けした肌に（目玉の絵＝x160〜380・y860〜 は除く）。手の色（FC.skinColor）も同じ割合で合わせる
+    for (var ty = 0; ty < S; ty++) for (var tx = 0; tx < S; tx++) {
+      if (ty >= 860 && tx >= 160 && tx < 380) continue;
+      var ti = (ty * S + tx) * 4;
+      d[ti] *= FC.TAN[0]; d[ti + 1] *= FC.TAN[1]; d[ti + 2] *= FC.TAN[2];
+    }
     // 頬の肌の色（あとで生え際や刈り上げに使う）
     var sk = [0, 0, 0], n = 0;
     for (var y = 330; y < 360; y++) for (var x = 400; x < 420; x++) { var j = (y * S + x) * 4; sk[0] += d[j]; sk[1] += d[j + 1]; sk[2] += d[j + 2]; n++; }
@@ -12356,8 +12363,8 @@ animateLoop();
     for (var y2 = 0; y2 < H; y2++) for (var x2 = 0; x2 < S; x2++) {
       var i = (y2 * S + x2) * 4, r = d[i], g = d[i + 1], b = d[i + 2];
       if (r + g + b < 12) {
-        // 頭のてっぺんの絵のすき間（黒）は地肌の色でうめる
-        if (y2 < 170 && x2 > 380 && x2 < 644) { d[i] = sk0[0]; d[i + 1] = sk0[1]; d[i + 2] = sk0[2]; d[i + 3] = 255; }
+        // 頭のてっぺんの絵のすき間（黒）は髪でうめる（あとの金髪の色付けでほかの髪と同じ色になる）
+        if (y2 < 170 && x2 > 380 && x2 < 644) { d[i] = d[i + 1] = d[i + 2] = 60; d[i + 3] = 255; mask[y2 * S + x2] = 1; }
         continue;
       }
       var lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
@@ -12382,29 +12389,34 @@ animateLoop();
       return out;
     }
     var soft = boxBlur(boxBlur(mask, 14), 14);
+    // 立体の毛束（addSpikes）がどこに生えるかを決めるのに使う
+    FC.hairMask = { soft: soft, W: S, H: H };
     for (var y4 = 0; y4 < H; y4++) for (var x4 = 0; x4 < S; x4++) {
       var p = y4 * S + x4; if (!mask[p]) continue;
       var k = p * 4, lum2 = (0.299 * d[k] + 0.587 * d[k + 1] + 0.114 * d[k + 2]) / 255;
-      // 黒がまさったごま塩（元の毛の筋の明るさを生かし、ところどころ白い毛）
+      // 金髪（脱色した明るい金色）。元の毛の筋の明るさを生かし、明るい毛・暗い毛をまぜて毛束らしく
       var strand = rnd(x4 * 7.1 + Math.floor(y4 / 5) * 3.3);
-      var grey = 0.2 + lum2 * 1.2 + (strand < 0.28 ? 0.24 : 0);
-      // 頭頂は薄く、耳より下（えり足・横）は短く刈り上げ。境目ほど毛が少ない
+      var gold = Math.min(1.12, 0.72 + lum2 * 0.8 + (strand < 0.3 ? 0.14 : 0) - (strand > 0.86 ? 0.16 : 0));
+      // 頭頂までしっかり生えた短髪、耳より下（えり足・横）はくっきり刈り上げ
       var crown = Math.max(0, 1 - Math.hypot((x4 - 512) / 150, (y4 - 40) / 110));
-      var buzz = Math.max(0, Math.min(1, (y4 - 380) / 60));
-      var density = Math.pow(Math.min(1, soft[p] * 1.25), 1.3) * (1 - Math.min(1, crown * 1.1) * 0.8) * (1 - buzz * 0.55);
+      var buzz = Math.max(0, Math.min(1, (y4 - 370) / 30));
+      var density = Math.pow(Math.min(1, soft[p] * 1.35), 1.1) * (1 - Math.min(1, crown) * 0.15) * (1 - buzz * 0.62);
       // 毛の筋ごとに、地肌が見えるかどうかを決める（細い毛が並んでいるように）
       var hairHere = rnd(x4 * 3.7 + y4 * 0.37) < density ? 1 : density * 0.5;
-      d[k] = 255 * grey * hairHere + sk0[0] * (1 - hairHere);
-      d[k + 1] = 255 * grey * 0.99 * hairHere + sk0[1] * 0.98 * (1 - hairHere);
-      d[k + 2] = 255 * grey * 0.98 * hairHere + sk0[2] * 0.97 * (1 - hairHere);
+      // 地肌が見えるところは根元の色（少し暗い茶色）をまぜる
+      var root = hairHere < 1 ? 0.35 : 0;
+      var hr = 240 * gold * (1 - root) + 110 * root, hg = 208 * gold * (1 - root) + 80 * root, hb = 138 * gold * (1 - root) + 50 * root;
+      d[k] = Math.min(255, hr) * hairHere + sk0[0] * (1 - hairHere);
+      d[k + 1] = Math.min(255, hg) * hairHere + sk0[1] * 0.98 * (1 - hairHere);
+      d[k + 2] = Math.min(255, hb) * hairHere + sk0[2] * 0.97 * (1 - hairHere);
     }
-    // 髪の束の絵（右下）も、残した根元に使われるので同じ白髪まじりの色に
+    // 髪の束の絵（右下）も、残した根元に使われるので同じ金髪の色に
     for (var y5 = 640; y5 < S; y5++) for (var x5 = 540; x5 < S; x5++) {
       var q = (y5 * S + x5) * 4;
       if (d[q] + d[q + 1] + d[q + 2] < 12) continue;
       var l5 = (0.299 * d[q] + 0.587 * d[q + 1] + 0.114 * d[q + 2]) / 255;
-      var g5 = 255 * (0.2 + l5 * 1.2 + (rnd(x5 * 7.1 + Math.floor(y5 / 5) * 3.3) < 0.28 ? 0.24 : 0));
-      d[q] = g5; d[q + 1] = g5 * 0.99; d[q + 2] = g5 * 0.98;
+      var g5 = Math.min(1.15, 0.5 + l5 * 1.1 + (rnd(x5 * 7.1 + Math.floor(y5 / 5) * 3.3) < 0.3 ? 0.2 : 0));
+      d[q] = Math.min(255, 240 * g5); d[q + 1] = Math.min(255, 208 * g5); d[q + 2] = Math.min(255, 138 * g5);
     }
     c.putImageData(im, 0, 0);
     // 生え際を後退させ（こめかみが深い M 字）、頭のてっぺんの切れ目もうめる。
@@ -12423,9 +12435,11 @@ animateLoop();
     mg.addColorStop(0, 'rgba(255,255,255,0.8)'); mg.addColorStop(1, 'rgba(255,255,255,1)');
     mc.fillStyle = mg;
     mc.beginPath();
-    mc.moveTo(372 - X0, 182); mc.quadraticCurveTo(386 - X0, 98, 440 - X0, 104);
-    mc.lineTo(450 - X0, 0); mc.lineTo(574 - X0, 0); mc.lineTo(584 - X0, 104);
-    mc.quadraticCurveTo(638 - X0, 98, 652 - X0, 182); mc.closePath(); mc.fill();
+    // 短髪なので生え際は少しだけ後退（こめかみが浅い M 字）。頭のてっぺんは髪のまま
+    // （元の絵の生え際にある暗い帯 y110〜120 をおおう高さまで）
+    mc.moveTo(372 - X0, 182); mc.quadraticCurveTo(388 - X0, 112, 432 - X0, 118);
+    mc.quadraticCurveTo(512 - X0, 70, 592 - X0, 118);
+    mc.quadraticCurveTo(636 - X0, 112, 652 - X0, 182); mc.closePath(); mc.fill();
     sc.globalCompositeOperation = 'destination-in';
     sc.drawImage(maskCv, 0, 0);
     c.drawImage(skinCv, X0, TOP);
@@ -12553,13 +12567,138 @@ animateLoop();
       var n = mean + (Math.random() * 2 - 1) * sd * 1.5;
       if (i >= S) n = n * 0.55 + id.data[(i - S) * 4] * 0.45;
       n = Math.max(0, Math.min(255, n));
-      id.data[i * 4] = n; id.data[i * 4 + 1] = n; id.data[i * 4 + 2] = n * 0.97; id.data[i * 4 + 3] = 255;
+      id.data[i * 4] = n; id.data[i * 4 + 1] = n * 0.83; id.data[i * 4 + 2] = n * 0.5; id.data[i * 4 + 3] = 255;
     }
     cx.putImageData(id, 0, 0);
     var t = new THREE.CanvasTexture(cv);
     if (map && map.encoding !== undefined) t.encoding = map.encoding;
     return t;
   }
+  // ---------------------------------------------------------------------------
+  // 顔の形を変える：丸顔（ほほ〜あごの横をふくらませる）と、少し二重あご（あごの下を前・下へ）
+  // ・場所は顔の絵の配置（目 y290・鼻 y345・口 y410・あご y480、中心 x512）で決める
+  // ・向き（右・上・前）は、目・鼻・あごの頂点の位置から求める（モデルの向きに左右されない）
+  // ---------------------------------------------------------------------------
+  FC.shapeFace = function(geo, map) {
+    var pos = geo.attributes.position, uv = geo.attributes.uv; if (!pos || !uv || !FC.SHAPE) return;
+    var flip = map && map.flipY !== false, N = pos.count, TX = [], TY = [];
+    for (var i = 0; i < N; i++) { TX.push(uv.getX(i) * 1024); TY.push((flip ? 1 - uv.getY(i) : uv.getY(i)) * 1024); }
+    function near(x, y, r) {
+      var s = new THREE.Vector3(), n = 0, v = new THREE.Vector3();
+      for (var i = 0; i < N; i++) if (Math.hypot(TX[i] - x, TY[i] - y) < r) { s.add(v.fromBufferAttribute(pos, i)); n++; }
+      return n ? s.divideScalar(n) : null;
+    }
+    var eA = near(437, 290, 30), eB = near(587, 290, 30), nose = near(512, 350, 18), chin = near(512, 480, 22);
+    if (!eA || !eB || !nose || !chin) { FC.shapeError = 'landmarks'; return; }
+    var mid = eA.clone().add(eB).multiplyScalar(0.5), E = eA.distanceTo(eB);
+    var right = eB.clone().sub(eA).normalize();
+    var up = mid.clone().sub(chin); up.sub(right.clone().multiplyScalar(up.dot(right))).normalize();
+    var fwd = new THREE.Vector3().crossVectors(right, up).normalize();
+    if (fwd.dot(nose.clone().sub(mid)) < 0) fwd.negate();
+    function bump(t, c, h) { var a = Math.abs(t - c) / h; return a >= 1 ? 0 : 0.5 + 0.5 * Math.cos(a * Math.PI); }
+    var v = new THREE.Vector3(), rel = new THREE.Vector3(), k = FC.SHAPE;
+    for (var j = 0; j < N; j++) {
+      var tx = TX[j], ty = TY[j]; if (ty > 640) continue;
+      v.fromBufferAttribute(pos, j); rel.copy(v).sub(mid);
+      var x = rel.dot(right) / E, side = x < 0 ? -1 : 1;
+      // ほほの下〜あごの横（口の高さあたり）を横と少し前へ
+      var wc = bump(ty, 430, 85) * bump(Math.abs(tx - 512), 150, 95);
+      // あごの下（あご先より下の帯）を前と下へ。ふちはなだらかに
+      var wd = bump(ty, 535, 50) * bump(tx, 512, 150);
+      if (!wc && !wd) continue;
+      v.addScaledVector(right, side * E * 0.07 * wc * k).addScaledVector(fwd, E * 0.02 * wc * k);
+      v.addScaledVector(fwd, E * 0.09 * wd * k).addScaledVector(up, -E * 0.05 * wd * k);
+      pos.setXYZ(j, v.x, v.y, v.z);
+    }
+    pos.needsUpdate = true;
+    geo.computeBoundingSphere();
+    FC.shaped = true;
+  };
+  // ---------------------------------------------------------------------------
+  // 立ち上がった短い毛束（ツンツンの金髪）を、髪の生えている三角形の上に小さな角すいで並べる
+  // ・どこに生やすかは顔の絵の髪の目印（FC.hairMask）で決める。刈り上げ（絵の y370 より下）には生やさない
+  // ・てっぺんほど長く、横は短く。少し上向きにそろえ、ばらつきを入れて毛束らしく
+  // ・parent（頭の骨）に付けるので、頭といっしょに動く
+  // ---------------------------------------------------------------------------
+  FC.addSpikes = function(mesh, parent) {
+    var HM = FC.hairMask, map = mesh.material.map; if (!HM || !map) return null;
+    var geo = mesh.geometry, pos = geo.attributes.position, uv = geo.attributes.uv, idx = geo.index;
+    if (!idx || !uv) return null;
+    parent.updateMatrixWorld(true); mesh.updateMatrixWorld(true);
+    var flip = map.flipY !== false;
+    // 頂点の今の位置（ワールド）
+    var P = [], v = new THREE.Vector3();
+    for (var i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i);
+      if (mesh.isSkinnedMesh && mesh.boneTransform) mesh.boneTransform(i, v);
+      v.applyMatrix4(mesh.matrixWorld); P.push(v.clone());
+    }
+    function hairAt(u, w) {
+      var x = Math.round(u * HM.W), y = Math.round((flip ? 1 - w : w) * HM.W);
+      if (x < 0 || x >= HM.W || y < 0 || y >= HM.H) return 0;
+      return HM.soft[y * HM.W + x] * (y < 370 ? 1 : 0);
+    }
+    // 髪の三角形を集めて、頭の中心と大きさを求める
+    var tris = [], ctr = new THREE.Vector3(), nc = 0, top = -1e9, bot = 1e9;
+    for (var t = 0; t < idx.count; t += 3) {
+      var a = idx.getX(t), b = idx.getX(t + 1), c = idx.getX(t + 2);
+      var u = (uv.getX(a) + uv.getX(b) + uv.getX(c)) / 3, w = (uv.getY(a) + uv.getY(b) + uv.getY(c)) / 3;
+      var hm = hairAt(u, w); if (hm < 0.55) continue;
+      tris.push([a, b, c, hm]);
+      [a, b, c].forEach(function(k) { ctr.add(P[k]); nc++; top = Math.max(top, P[k].y); bot = Math.min(bot, P[k].y); });
+    }
+    if (!tris.length) return null;
+    ctr.divideScalar(nc);
+    var R = 0; tris.forEach(function(tr) { R = Math.max(R, P[tr[0]].distanceTo(ctr)); });
+    // 面積に合わせて毛束の数を割り当てる
+    var areas = [], total = 0, e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), n = new THREE.Vector3();
+    tris.forEach(function(tr) {
+      e1.subVectors(P[tr[1]], P[tr[0]]); e2.subVectors(P[tr[2]], P[tr[0]]);
+      var ar = n.crossVectors(e1, e2).length() / 2; areas.push(ar); total += ar;
+    });
+    var COUNT = 6000, LEN = R * 0.11, RAD = R * 0.018;
+    var cone = new THREE.ConeGeometry(1, 1, 5, 1, true);
+    cone.translate(0, 0.5, 0);
+    var mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, metalness: 0.0 });
+    var inst = new THREE.InstancedMesh(cone, mat, COUNT);
+    var up = new THREE.Vector3(0, 1, 0), m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3();
+    var inv = new THREE.Matrix4().copy(parent.matrixWorld).invert();
+    var pw = new THREE.Vector3(), dir = new THREE.Vector3(), col = new THREE.Color(), placed = 0, seed = 1;
+    function r01() { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; }
+    for (var j = 0; j < tris.length && placed < COUNT; j++) {
+      var tr = tris[j], want = areas[j] / total * COUNT, cnt = Math.floor(want) + (r01() < want % 1 ? 1 : 0);
+      e1.subVectors(P[tr[1]], P[tr[0]]); e2.subVectors(P[tr[2]], P[tr[0]]);
+      n.crossVectors(e1, e2).normalize();
+      for (var k2 = 0; k2 < cnt && placed < COUNT; k2++) {
+        var r1 = r01(), r2 = r01(); if (r1 + r2 > 1) { r1 = 1 - r1; r2 = 1 - r2; }
+        pw.copy(P[tr[0]]).addScaledVector(e1, r1).addScaledVector(e2, r2);
+        var out = pw.clone().sub(ctr).normalize();
+        if (n.dot(out) < 0) n.negate();
+        // てっぺんほど長く（0〜1）、ふちの薄いところは短く
+        var hgt = Math.max(0, Math.min(1, (pw.y - bot) / Math.max(1e-6, top - bot)));
+        var len = LEN * (0.15 + 0.95 * Math.pow(hgt, 1.6)) * (0.7 + 0.6 * r01()) * Math.min(1, tr[3]);
+        dir.copy(n).multiplyScalar(0.55).add(out.multiplyScalar(0.25)).addScaledVector(up, 0.35 * hgt)
+          .add(new THREE.Vector3(r01() - 0.5, r01() - 0.5, r01() - 0.5).multiplyScalar(0.35)).normalize();
+        q.setFromUnitVectors(up, dir);
+        var rad = RAD * (0.7 + 0.6 * r01());
+        s.set(rad, len, rad);
+        // 根元は少しうめる
+        pw.addScaledVector(dir, -len * 0.18);
+        m4.compose(pw, q, s).premultiply(inv);
+        inst.setMatrixAt(placed, m4);
+        var g = 0.72 + 0.28 * r01();
+        col.setRGB(Math.min(1, 0.93 * g), Math.min(1, 0.75 * g), Math.min(1, 0.42 * g)).convertSRGBToLinear();
+        inst.setColorAt(placed, col);
+        placed++;
+      }
+    }
+    inst.count = placed;
+    inst.instanceMatrix.needsUpdate = true; if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+    inst.castShadow = true; inst.frustumCulled = false; inst.name = 'ojisan_hair_spikes';
+    parent.add(inst);
+    FC.spikes = inst;
+    return inst;
+  };
   function capBackHole(mesh, headBone) {
     var geo = mesh.geometry, uv = geo.attributes.uv, pos = geo.attributes.position;
     var pts = [], uvs = [], v = new THREE.Vector3();
@@ -12672,6 +12811,7 @@ animateLoop();
         var bones = src.skeleton.bones.map(function(b) { return R.bones[b.name] || null; });
         if (bones.some(function(b) { return !b; })) { FC.error = 'bone missing'; return; }
         var skel = new THREE.Skeleton(bones, src.skeleton.boneInverses);
+        try { FC.shapeFace(src.geometry, src.material.map); } catch (e) { console.warn('face shape failed', e); }
         var mesh = new THREE.SkinnedMesh(src.geometry, src.material);
         mesh.name = 'ojisan_head_jp';
         old.parent.add(mesh);
@@ -12680,7 +12820,10 @@ animateLoop();
         mesh.bind(skel, src.bindMatrix);
         removePonytail(mesh, R.bones['Bip01_Head']);
         // 骨の位置が最新になってから（描いたあと）ふたの位置を決める
-        setTimeout(function() { R.root.updateMatrixWorld(true); capBackHole(mesh, R.bones['Bip01_Head']); }, 1200);
+        setTimeout(function() {
+          R.root.updateMatrixWorld(true); capBackHole(mesh, R.bones['Bip01_Head']);
+          try { FC.addSpikes(mesh, R.bones['Bip01_Head']); } catch (e) { console.warn('hair spikes failed', e); }
+        }, 1200);
         mesh.castShadow = true; mesh.receiveShadow = true; mesh.frustumCulled = false;
         var mat = mesh.material;
         if (mat.map) {
@@ -12706,12 +12849,14 @@ animateLoop();
     var d = c.getImageData(26, 23, 4, 4).data, r = 0, g = 0, b = 0;
     for (var i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; }
     var n = d.length / 4;
-    return [r / n, g / n, b / n];
+    return [r / n * FC.TAN[0], g / n * FC.TAN[1], b / n * FC.TAN[2]];
   };
   // 元の顔に戻す・付け替えるの切り替え（裏方パネル用）
   FC.toggle = function(on) {
     if (!FC.mesh) return;
     FC.mesh.visible = on; FC.old.visible = !on;
+    if (FC.spikes) FC.spikes.visible = on;
+    if (FC.cap) FC.cap.visible = on;
   };
 
   if (typeof google !== 'undefined' && google.script && google.script.run) {
@@ -13041,11 +13186,18 @@ animateLoop();
 (function() {
   if (typeof THREE === 'undefined' || window.OJISAN_EXPR) return;
   // GAIN：全体の動きの強さ（大きいほど表情がはっきりする）
-  var EX = window.OJISAN_EXPR = { w: {}, forced: null, GAIN: 1.7 };
+  // LOOK：ふだんの顔（SHAPES.look）の強さ
+  var EX = window.OJISAN_EXPR = { w: {}, forced: null, GAIN: 1.7, LOOK: 1 };
 
   // 部位ごとの動き（m）。r = 外へ（右の部位は右、左の部位は左）、u = 上、f = 前。jaw はあごを開く角度（rad）
   // 左右がある部位は R/L を自動で付ける
   var SHAPES = {
+    // ふだんの顔（いつも重み 1 で下にしく）：細めで鋭い目つき、口角が少し上がった自信ありげな口元
+    look: {
+      EyeBlinkTop: { u: -0.0007 }, EyeBlinkBottom: { u: 0.0006 },
+      InnerEyebrow: { r: -0.0003, u: -0.0006 }, OuterEyebrow: { u: 0.0003 },
+      MouthCorner: { r: 0.0004, u: 0.0008 }, Cheek: { u: 0.0003 }
+    },
     smile: {
       MouthCorner: { r: 0.005, u: 0.0035, f: -0.003 }, Cheek: { u: 0.003, f: 0.0015 }, Upperlip: { r: 0.0015, u: 0.001 },
       EyeBlinkBottom: { u: 0.0022 }, OuterEyebrow: { u: 0.001 }
@@ -13153,6 +13305,8 @@ animateLoop();
   function apply(R, st, t) {
     // 重みを少しずつ目標へ
     var goal = target(st, t);
+    // ふだんの顔はいつも足す（EX.LOOK を 0 にすると元の顔つき）
+    goal.look = EX.LOOK;
     Object.keys(SHAPES).forEach(function(k) {
       var g = goal[k] || 0, cur = EX.w[k] || 0;
       EX.w[k] = cur + (g - cur) * 0.12;
