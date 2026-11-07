@@ -7427,8 +7427,8 @@ var clock = new THREE.Clock();
 // ============================================================================
 // 6. 60fps メインループ
 // ============================================================================
-// 歩く速さ（60fps の1フレームに進む m）：ふつう 0.021（約1.3m/秒）、あわてているとき 0.034（約2m/秒）
-var WALK_SPEED = 0.021, WALK_SPEED_PANIC = 0.034;
+// 歩く速さ（60fps の1フレームに進む m）：ふつう 0.0105（約0.63m/秒）、あわてているとき 0.017（約1m/秒）
+var WALK_SPEED = 0.0105, WALK_SPEED_PANIC = 0.017;
 var lastLoopT = null;
 function animateLoop() {
   requestAnimationFrame(animateLoop);
