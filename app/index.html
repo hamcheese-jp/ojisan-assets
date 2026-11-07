@@ -7429,14 +7429,33 @@ var clock = new THREE.Clock();
 // ============================================================================
 // 歩く速さ（60fps の1フレームに進む m）：ふつう 0.0105（約0.63m/秒）、あわてているとき 0.017（約1m/秒）
 var WALK_SPEED = 0.0105, WALK_SPEED_PANIC = 0.017;
-var lastLoopT = null;
+var lastLoopT = null, frameScaleSmooth = 1;
+// 画面を軽くする：35cm より小さい物（コップ・つまみ・小物）は影を落とさない（影の描画が半分近くになる）。
+// おじさん・猫・人（骨で動く物）はそのまま。あとから足された物にも効くよう、2秒ごとに新しい物だけ調べる
+var SMALL_SHADOW = 0.35, lastShadowTrim = -10;
+function trimSmallShadowCasters() {
+  var bb = new THREE.Box3(), sz = new THREE.Vector3();
+  window.scene.traverse(function(o) {
+    if (!o.isMesh || !o.castShadow || o.userData.shadowTrimmed) return;
+    o.userData.shadowTrimmed = true;
+    if (o.isSkinnedMesh || o.isInstancedMesh) return;
+    for (var p = o; p; p = p.parent) if (p === window.ojisan || p === window.cat3D) return;
+    bb.setFromObject(o); if (bb.isEmpty()) return;
+    bb.getSize(sz);
+    if (Math.max(sz.x, sz.y, sz.z) < SMALL_SHADOW) o.castShadow = false;
+  });
+}
 function animateLoop() {
   requestAnimationFrame(animateLoop);
   var t = clock.getElapsedTime();
   var st = window.state;
   // 1フレームの長さ（60fps を 1）。歩く速さを画面のなめらかさ（60Hz/144Hz など）に左右されないようにする
-  window.FRAME_SCALE = (lastLoopT === null) ? 1 : Math.max(0, Math.min(3, (t - lastLoopT) * 60));
+  // 1フレームだけ長くかかったときに、おじさんが一気に進んで「とんだ」ように見えないよう、ならしてから使う
+  var rawScale = (lastLoopT === null) ? 1 : Math.max(0, Math.min(3, (t - lastLoopT) * 60));
+  frameScaleSmooth += (Math.min(rawScale, 2) - frameScaleSmooth) * 0.15;
+  window.FRAME_SCALE = frameScaleSmooth;
   lastLoopT = t;
+  if (t - lastShadowTrim > 2) { lastShadowTrim = t; trimSmallShadowCasters(); }
 
   if (!window.RENDER_STARTED) {
     window.RENDER_STARTED = true;
