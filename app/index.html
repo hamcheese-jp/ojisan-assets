@@ -15,7 +15,7 @@
     try { window.speechSynthesis.speak = function () {}; } catch (e) {}
     // このPCの中の仕組み（声を作るソフトなど）にはつながない
     var of = window.fetch;
-    window.fetch = function (u) { if (/^https?://(localhost|127.0.0.1)/.test(String(u && u.url || u))) return Promise.reject(new Error('readonly')); return of.apply(this, arguments); };
+    window.fetch = function (u) { var s = String(u && u.url || u); if (s.indexOf('://localhost') >= 0 || s.indexOf('://127.0.0.1') >= 0) return Promise.reject(new Error('readonly')); return of.apply(this, arguments); };
     try { HTMLMediaElement.prototype.play = function () { return Promise.resolve(); }; } catch (e) {}
     try { var AC = window.AudioContext || window.webkitAudioContext; if (AC) AC.prototype.resume = function () { return Promise.resolve(); }; } catch (e) {}
     try { var si = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if (/^ojisan_/.test(k)) return; return si.apply(this, arguments); }; } catch (e) {}
@@ -590,7 +590,7 @@
       <button onclick="setCameraView('front')">👤 おじさんアップ</button>
     </div>
     <!-- 動作の様子（版・1秒に描いた回数・1回の時間・画面の大きさ）：重いときの確認用 -->
-    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 10:59</div>
+    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 11:05</div>
     <div class="preset-btns" style="margin-top:4px;">
       <button onclick="jumpTo('weekday', 8, 25)" style="border-color:#38bdf8;">🚗 通勤(車内サイン)</button>
       <button onclick="jumpTo('weekday', 10, 30)" style="border-color:#38bdf8;">🏢 会社オフィス</button>
