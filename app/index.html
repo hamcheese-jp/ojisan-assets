@@ -590,7 +590,7 @@
       <button onclick="setCameraView('front')">👤 おじさんアップ</button>
     </div>
     <!-- 動作の様子（版・1秒に描いた回数・1回の時間・画面の大きさ）：重いときの確認用 -->
-    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 11:28</div>
+    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 12:17</div>
     <div class="preset-btns" style="margin-top:4px;">
       <button onclick="jumpTo('weekday', 8, 25)" style="border-color:#38bdf8;">🚗 通勤(車内サイン)</button>
       <button onclick="jumpTo('weekday', 10, 30)" style="border-color:#38bdf8;">🏢 会社オフィス</button>
@@ -15305,7 +15305,14 @@ animateLoop();
       '  <button id="vvRetry" style="font-size:11px;">接続</button>' +
       '</div>' +
       '<select id="vvSpeaker" style="width:100%; margin-top:6px; font-size:11px;"></select>' +
-      '<button id="vvTest" style="width:100%; margin-top:6px; font-size:11px;">声のテスト</button>';
+      '<button id="vvTest" style="width:100%; margin-top:6px; font-size:11px;">声のテスト</button>' +
+      // つながらないときの手順
+      '<div id="vvHelp" style="font-size:10.5px; color:#94a3b8; margin-top:6px; line-height:1.55;">' +
+      'つなぎ方：①このPCで VOICEVOX を起動したままにする ' +
+      '②<a href="http://127.0.0.1:50021/setting" target="_blank" style="color:#7dd3fc;">エンジンの設定</a>の「Allow Origin」に ' +
+      '<code>https://hamcheese-jp.github.io</code> を入れて保存（VOICEVOX を再起動） ' +
+      '③ブラウザが「ローカルネットワークへのアクセス」をたずねたら許可 ' +
+      '④パネル上の「🔇 音声・生活音ON」を押して音を出す。15秒ごとに自動でつなぎにいきます</div>';
     drawer.appendChild(card);
     document.getElementById('vvUrl').value = V.url;
     document.getElementById('vvRetry').onclick = function() {
@@ -15333,6 +15340,8 @@ animateLoop();
       st.textContent = V.available ? '🟢 接続中' : '⚪ 未接続（ブラウザの声）';
       st.style.color = V.available ? '#00ff88' : '#94a3b8';
     }
+    var help = document.getElementById('vvHelp');
+    if (help) help.style.display = V.available ? 'none' : 'block';
     var sel = document.getElementById('vvSpeaker');
     if (sel && V.speakers.length && sel.options.length === 0) {
       V.speakers.forEach(function(sp) {
@@ -15355,6 +15364,7 @@ animateLoop();
     fetch(V.url + '/speakers')
       .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
       .then(function(list) {
+        var wasOff = !V.available;
         V.available = true;
         V.speakers = list || [];
         var sel = document.getElementById('vvSpeaker');
@@ -15363,7 +15373,7 @@ animateLoop();
         V.speakers.forEach(function(sp) {
           (sp.styles || []).forEach(function(s) { if (s.id === V.speaker) V.speakerName = sp.name; });
         });
-        if (window.addLog) window.addLog('🎙️ VOICEVOX につながりました（' + V.speakerName + '）');
+        if (wasOff && window.addLog) window.addLog('🎙️ VOICEVOX につながりました（' + V.speakerName + '）');
         renderPanel();
         renderCredit();
       })
@@ -15431,8 +15441,8 @@ animateLoop();
 
   buildPanel();
   connect();
-  // 配信の途中で VOICEVOX を起動しても使えるように、未接続の間は時々探す
-  setInterval(function() { if (!V.available) connect(); }, 2 * 60 * 1000);
+  // 配信の途中で VOICEVOX を起動しても使えるように、未接続の間は15秒ごとに探す
+  setInterval(function() { if (!V.available) connect(); }, 15 * 1000);
 })();
 </script>
 
