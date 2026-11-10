@@ -563,6 +563,8 @@
       <button onclick="setCameraView('overview')">🏠 斜め全景</button>
       <button onclick="setCameraView('front')">👤 おじさんアップ</button>
     </div>
+    <!-- 動作の様子（版・1秒に描いた回数・1回の時間・画面の大きさ）：重いときの確認用 -->
+    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 10:20</div>
     <div class="preset-btns" style="margin-top:4px;">
       <button onclick="jumpTo('weekday', 8, 25)" style="border-color:#38bdf8;">🚗 通勤(車内サイン)</button>
       <button onclick="jumpTo('weekday', 10, 30)" style="border-color:#38bdf8;">🏢 会社オフィス</button>
@@ -7461,7 +7463,37 @@ window.setRenderFps = function(f) {
   try { localStorage.setItem('ojisan_render_fps', String(f)); } catch (e) {}
   if (window.addLog) window.addLog('🎞️ 画面を1秒に ' + f + ' 回描きます');
 };
+// 動作の様子を1秒ごとにパネル（perfLine）へ書く：版・描いた回数・1回にかかった時間・画面の大きさ・グラフィック
+var perf = { loops: 0, draws: 0, ms: 0, maxMs: 0, at: performance.now() };
+var perfGpu = (function() {
+  try { var gl = window.renderer.getContext(), ext = gl.getExtension('WEBGL_debug_renderer_info'); return ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)).replace(/ANGLE \(|\)$/g, '').replace(/Direct3D.*$/, '') : ''; } catch (e) { return ''; }
+})();
+function perfReport(now) {
+  var secs = (now - perf.at) / 1000;
+  if (secs < 1) return;
+  var el = document.getElementById('perfLine');
+  if (el) {
+    var c = window.renderer.domElement;
+    var ver = /BUILD_TIME/.test(el.dataset.ver || el.textContent) ? 'GAS版' : (el.dataset.ver || el.textContent.replace(/^版\s*/, '').split(' ・')[0]);
+    el.dataset.ver = ver;
+    el.textContent = '版 ' + ver + ' ・ 描いた回数 ' + (perf.draws / secs).toFixed(0) + '/秒（設定 ' + (window.RENDER_FPS || 60) + '）' +
+      ' ・ 画面の更新 ' + (perf.loops / secs).toFixed(0) + '/秒 ・ 1回 平均 ' + (perf.ms / Math.max(1, perf.loops)).toFixed(1) + 'ms（最大 ' + perf.maxMs.toFixed(0) + 'ms）' +
+      ' ・ 画面 ' + c.width + '×' + c.height + '（倍率 ' + window.renderer.getPixelRatio().toFixed(2) + '）' + (perfGpu ? ' ・ ' + perfGpu : '');
+  }
+  window.OJISAN_PERF = { draws: perf.draws / secs, loops: perf.loops / secs, avgMs: perf.ms / Math.max(1, perf.loops), maxMs: perf.maxMs };
+  perf.loops = 0; perf.draws = 0; perf.ms = 0; perf.maxMs = 0; perf.at = now;
+}
 function animateLoop() {
+  var perfStart = performance.now();
+  try { animateLoopBody(); }
+  finally {
+    var d = performance.now() - perfStart;
+    perf.loops++; perf.ms += d; if (d > perf.maxMs) perf.maxMs = d;
+    if (window.RENDER_THIS_FRAME) perf.draws++;
+    perfReport(perfStart + d);
+  }
+}
+function animateLoopBody() {
   requestAnimationFrame(animateLoop);
   var t = clock.getElapsedTime();
   var st = window.state;
