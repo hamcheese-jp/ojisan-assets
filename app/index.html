@@ -5930,7 +5930,13 @@ window.updateOuterStagesAnimation = function(t, st) {
           return;
         }
         var npc = X.list[i++];
-        loadPerson(npc, function() { if (npc.real.mixer) ok++; next(); });
+        // 家にいる間は、1人ずつ間をあけて読む（読み込みのたびに画面が一瞬止まるのを散らす）。
+        // 会社・スーパー・車のときは人が要るので、すぐ続けて読む
+        loadPerson(npc, function() {
+          if (npc.real.mixer) ok++;
+          var st = window.state;
+          setTimeout(next, (st && st.cameraStage === 'HOME') ? 4000 : 0);
+        });
       })();
     }, undefined, function(err) {
       console.warn('extra anims load failed', err);
@@ -5940,7 +5946,8 @@ window.updateOuterStagesAnimation = function(t, st) {
   if (typeof google !== 'undefined' && google.script && google.script.run) {
     google.script.run.withSuccessHandler(function(cfg) {
       // おじさんの読み込みを先に済ませるため、少し待ってから始める
-      if (cfg && cfg.modelUrl) setTimeout(function() { start(cfg.modelUrl); }, 4000);
+      // 家にいるときは人が要らないので、おじさん・部屋が落ち着いてから（15秒後）読み始める
+      if (cfg && cfg.modelUrl) setTimeout(function() { start(cfg.modelUrl); }, (window.state && window.state.cameraStage === 'HOME') ? 15000 : 4000);
     }).getAssetConfig();
   }
 })();
@@ -7302,8 +7309,9 @@ var BODY_CANDIDATES = (function() {
   var list = [];
   // 正面から左右に 45度（斜め前）をいちばん優先し、だめならそこから少しずつずらす
   var Q = Math.PI / 4;
-  [Q, -Q, 0.5, -0.5, 1.0, -1.0, 0.3, -0.3, 1.2, -1.2, 0, 1.5, -1.5].forEach(function(dy) {
-    [1, 1.15, 0.9].forEach(function(k) { list.push({ dy: dy, k: k, score: Math.abs(Math.abs(dy) - Q) * 1.2 + (dy < 0 ? 0.01 : 0) + Math.abs(1 - k) * 1.5 }); });
+  [Q, -Q, 0.5, -0.5, 1.0, -1.0, 0.3, -0.3, 1.2, -1.2, 0, 1.5, -1.5, 2.0, -2.0, Math.PI].forEach(function(dy) {
+    // 近め（0.75・0.6）は、どの角度でも壁にかかる部屋のすみ（机・ベッドの横など）のための最後の手
+    [1, 1.15, 0.9, 0.75, 0.6].forEach(function(k) { list.push({ dy: dy, k: k, score: Math.abs(Math.abs(dy) - Q) * 1.2 + (dy < 0 ? 0.01 : 0) + Math.abs(1 - k) * 1.5 }); });
   });
   return list.sort(function(a, b) { return a.score - b.score; });
 })();
@@ -7334,6 +7342,14 @@ function isBigStructure(o) {
     o.userData.__big = sz.y >= 2.1 || Math.max(sz.x, sz.z) > 3.2;
   }
   return o.userData.__big;
+}
+// テーブル・机・カウンターの天板：厚さ12cm未満・幅30cm以上の平たい板で、上の面が1.3mより低い
+function isTabletop(o) {
+  if (o.userData.__top === undefined) {
+    var b = worldBox(o), sz = b.getSize(new THREE.Vector3());
+    o.userData.__top = sz.y < 0.12 && Math.min(sz.x, sz.z) >= 0.3 && b.max.y < 1.3;
+  }
+  return o.userData.__top;
 }
 // カメラが家具の中に入ってしまう数（冷蔵庫の中から撮る、などを避ける）
 // 家具はいくつもの板でできているので、板をまとめたグループ（親）の箱で調べる
@@ -7396,7 +7412,10 @@ window.findBodyCloseup = function(yaw) {
   wasHidden.forEach(function(o) { o.visible = false; });
   var big = occ.filter(isBigStructure);
   // 大きな物（壁など）にさえぎられない角度を選ぶ。今の角度が使えるなら続ける
-  function cost(pk) { var cp = posFor(pk); return blockers(cp, pts, big).length + insideCount(cp, occ); }
+  // 家の中では、カメラが外壁の外（家の外）に出る角度は使わない
+  var home = window.state && window.state.cameraStage === 'HOME';
+  function outside(cp) { return home && (cp.x < -7.85 || cp.x > 7.85 || cp.z < -4.85 || cp.z > 6.2); }
+  function cost(pk) { var cp = posFor(pk); return (outside(cp) ? 100 : 0) + blockers(cp, pts, big).length + insideCount(cp, occ); }
   if (!(bodyShot.pick && cost(bodyShot.pick) === 0)) {
     // どこからでも壁にかかるときは、かかる壁がいちばん少ない角度にする
     var pick = null, fewest = 1e9;
@@ -7413,6 +7432,8 @@ window.findBodyCloseup = function(yaw) {
   var hideList = blockers(pos, pts, occ);
   // カメラのすぐそば（70cm 以内）の物（つり下げの照明など）も、画面の手前をふさぐので消す
   occ.forEach(function(o) { if (worldBox(o).distanceToPoint(pos) < 0.7 && hideList.indexOf(o) < 0) hideList.push(o); });
+  // テーブル・机・カウンターの天板（低い所の平たい板）は消さない（透けて見えると不自然なため）
+  hideList = hideList.filter(function(o) { return !isTabletop(o); });
   hideList.forEach(function(o) { o.visible = false; if (bodyShot.hidden.indexOf(o) < 0) bodyShot.hidden.push(o); });
   return { pos: pos, target: target };
 };
@@ -7827,7 +7848,6 @@ animateLoop();
     if (o.layers.mask !== 1) return false;
     // とても薄い物（画面・ポスター・絵の重ね・ラベルなど、1.2cm 未満）は、別の面にぴったり重ねてあることが多い。
     // 描く順番で見え方が変わるので、まとめずに元のまま（まとめた形のあと）に描く
-    if (isThin(o)) return false;
     return true;
   }
   function isThin(o) {
@@ -7914,6 +7934,12 @@ animateLoop();
     R.br.visible = root.visible && root.parent !== null;
     R.br.position.copy(root.position); R.br.quaternion.copy(root.quaternion); R.br.scale.copy(root.scale);
     if (!R.br.visible || !R.members.size) return;
+    // 朝夕・夜に homelife.html が素材ごとの映り込みの強さ（envMapIntensity）を少しずつ変えるので、
+    // まとめた形の素材も元の部品と同じ値にそろえる（同じまとめの部品は、みな同じ値）
+    for (var bk in R.batches) {
+      var bt = R.batches[bk], src = bt.list[0] && bt.list[0].material, dm = bt.mesh.material;
+      if (src && src.envMapIntensity !== undefined && dm.envMapIntensity !== src.envMapIntensity) dm.envMapIntensity = src.envMapIntensity;
+    }
     bad.length = 0;
     R.nodes.forEach(function(rec, n) {
       if (!same(rec.vals, nodeVals(n, scratch))) for (var k = 0; k < rec.members.length; k++) bad.push(rec.members[k]);
@@ -7977,7 +8003,8 @@ animateLoop();
     mesh.castShadow = list[0].castShadow; mesh.receiveShadow = list[0].receiveShadow;
     mesh.matrixAutoUpdate = false;
     // まとめた形は先に描く：同じ面にぴったり重ねた物（画面・ポスターなど）が、これまでどおり上に出るように
-    mesh.renderOrder = -1;
+    // ふつうの物のまとめ（-2）→ 薄い物のまとめ（-1）→ まとめていない物（0）の順
+    mesh.renderOrder = /#T$/.test(key) ? -1 : -2;
     R.br.add(mesh);
     if (old) { R.br.remove(old.mesh); old.mesh.geometry.dispose(); }
     var b = { key: key, mesh: mesh, alive: list.length, dirty: false, verts: nV, list: list };
@@ -8008,9 +8035,11 @@ animateLoop();
     return c.sig;
   }
   // まとめる単位：同じ見た目の素材 × 8m 四方の場所（1か所が変わっても、その場所の分だけ作り直せばすむように）
+  // 薄い物（画面・絵・ポスター・ラベルなど 1.2cm 未満）は別のまとめにして、ふつうの物のあとに描く
+  // （ぴったり重ねた面は、あとに描いた方が上に出る。元の見え方と同じ順番にする）
   function keyOf(o, sig) {
     var e = o.matrixWorld.elements, cell = Math.floor(e[12] / 8) + ',' + Math.floor(e[14] / 8);
-    return sig + '#' + attrSig(o.geometry) + '#' + (o.castShadow ? 1 : 0) + (o.receiveShadow ? 1 : 0) + '#' + cell;
+    return sig + '#' + attrSig(o.geometry) + '#' + (o.castShadow ? 1 : 0) + (o.receiveShadow ? 1 : 0) + '#' + cell + '#' + (isThin(o) ? 'T' : 'B');
   }
   // 部品の形・素材・つながりの全部（落ち着いているかの判定用。素材の文字列はキャッシュを使う）
   function candSnap(o, chain, now) {
@@ -8046,10 +8075,6 @@ animateLoop();
   function scanOne(R, o, now) {
     var root = R.root, sc = R.scan;
     var g = o.geometry;
-    if (g && g.attributes && g.attributes.position && visibleIn(o, root) && isThin(o)) {
-      sc.thin.push(new THREE.Box3().setFromObject(o).expandByScalar(0.004));
-      R.cand.delete(o); return;
-    }
     if (R.members.has(o) || !eligible(o) || !visibleIn(o, root)) { R.cand.delete(o); return; }
     var chain = chainOf(o, root); if (!chain) { R.cand.delete(o); return; }
     var snap = candSnap(o, chain, now), c = R.cand.get(o);
@@ -8057,7 +8082,6 @@ animateLoop();
     // 何度も変わる物ほど長く待つ（8秒・40秒・72秒・104秒）。2分間変化がなければふつうに戻る
     var u = o.userData, nCh = (u.sbLastChange && now - u.sbLastChange > 120) ? 0 : Math.min(3, u.sbChanges || 0);
     if (now - c.since < SB.STABLE * (1 + 4 * nCh)) return;
-    if (touchesThin(R, o, now)) return;
     var key = keyOf(o, matSigCached(o.material, now));
     (sc.ready[key] = sc.ready[key] || []).push(o);
   }
@@ -8175,7 +8199,245 @@ animateLoop();
   var baseRender = window.renderer.render;
   window.renderer.render = function(sc, cam) {
     if (sc === window.scene) { try { SB.prepare(); } catch (e) { console.warn('static batch', e); SB.setEnabled(false); } }
+    if (sc === window.scene && cam === window.camera && window.OJISAN_SHADOWCACHE) {
+      return window.OJISAN_SHADOWCACHE.renderMain(this, baseRender, arguments);
+    }
     return baseRender.apply(this, arguments);
+  };
+})();
+
+// ============================================================================
+// 8. 影の下書き（シャドウマップ）の使い回し（見た目はそのまま、グラフィックの仕事を減らす）
+// ・太陽は動かないので、動かない物（家具・壁）の影は1回描いて保存しておく
+// ・毎フレームは、保存した影を「動く物のまわりだけ」書き戻し、その上に動く物（おじさん・猫・人・動いている家具）の影だけを描く
+// ・動かない物が動いた・消えた・現れたとき、光が変わったときは、保存した影を描き直す
+// ・止めたいとき：OJISAN_SHADOWCACHE.enabled = false
+// ============================================================================
+(function() {
+  if (window.OJISAN_SHADOWCACHE) return;
+  var renderer = window.renderer;
+  if (!renderer.capabilities.isWebGL2) return;
+  var SC = window.OJISAN_SHADOWCACHE = { enabled: true, SETTLE: 2, SCAN: 1, stats: { full: 0, frames: 0 } };
+  var sun = window.sunLight;
+
+  // 保存した影を写すための、画面いっぱいの四角（色と奥行きの両方を書く）
+  var blitMat = new THREE.ShaderMaterial({
+    uniforms: { tMap: { value: null } },
+    vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: '#include <packing>\nuniform sampler2D tMap; varying vec2 vUv;\n' +
+      'void main() { vec4 c = texture2D(tMap, vUv); gl_FragColor = c; gl_FragDepthEXT = unpackRGBAToDepth(c); }',
+    depthTest: true, depthWrite: true, depthFunc: THREE.AlwaysDepth, blending: THREE.NoBlending, toneMapped: false
+  });
+  blitMat.extensions.fragDepth = true;
+  var copyMat = new THREE.ShaderMaterial({
+    uniforms: { tMap: { value: null } },
+    vertexShader: blitMat.vertexShader,
+    fragmentShader: 'uniform sampler2D tMap; varying vec2 vUv; void main() { gl_FragColor = texture2D(tMap, vUv); }',
+    depthTest: false, depthWrite: false, blending: THREE.NoBlending, toneMapped: false
+  });
+  var quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), blitMat);
+  quad.frustumCulled = false;
+  var quadScene = new THREE.Scene(); quadScene.add(quad);
+  var quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  var cacheRT = null;
+
+  // ---- 影を落とす物の一覧と、動いたかどうかの記録 ----
+  var casters = new Map();   // mesh -> { vals, lastChange, isStatic }
+  var lastScan = -1e9, needFull = true, lightVals = null, scratch = [];
+  function visibleChain(o) { for (var p = o; p; p = p.parent) { if (!p.visible) return false; if (p === window.scene) return true; } return false; }
+  function alwaysDynamic(o) { return o.isSkinnedMesh || o.isInstancedMesh || !!o.morphTargetInfluences; }
+  function vals(o, a) {
+    a.length = 0;
+    var e = o.matrixWorld.elements;
+    for (var i = 0; i < 16; i++) a.push(e[i]);
+    var g = o.geometry, m = o.material;
+    a.push(visibleChain(o) ? 1 : 0, o.castShadow ? 1 : 0, o.layers.mask, g, g.attributes.position ? g.attributes.position.version : -1, g.index ? g.index.version : -1, m, m && m.side, m && m.alphaTest, m && m.map, m && m.visible);
+    return a;
+  }
+  function same(a, b) { if (a.length !== b.length) return false; for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; }
+  function lightSnap() {
+    var a = [];
+    var e = sun.matrixWorld.elements, f = sun.target.matrixWorld.elements;
+    for (var i = 0; i < 16; i++) a.push(e[i], f[i]);
+    var c = sun.shadow.camera;
+    a.push(sun.visible ? 1 : 0, sun.castShadow ? 1 : 0, c.left, c.right, c.top, c.bottom, c.near, c.far, sun.shadow.mapSize.x, sun.shadow.mapSize.y, sun.shadow.bias, sun.shadow.normalBias);
+    return a;
+  }
+  // 影を落とすほかの光（太陽以外）が点いていたら、この仕組みは使わない（元どおり毎回全部描く）
+  function otherShadowLights() {
+    var found = false;
+    window.scene.traverseVisible(function(o) { if (!found && o.isLight && o !== sun && o.castShadow) found = true; });
+    return found;
+  }
+
+  function scan(now) {
+    lastScan = now;
+    var seen = new Set();
+    window.scene.traverse(function(o) {
+      if (!o.isMesh || !o.castShadow || !(o.layers.mask & 1) || !visibleChain(o)) return;
+      seen.add(o);
+      var c = casters.get(o);
+      if (!c) { casters.set(o, { vals: vals(o, []), lastChange: now, isStatic: false }); return; }
+      // しばらく動いていない物は「動かない物」に入れる（入れたら保存した影を描き直す）
+      // 何度も動く物ほど長く待つ（2秒・8秒・14秒…）。2分動かなければ数え直す
+      var nCh = (now - c.lastChange > 120) ? 0 : Math.min(4, c.changes || 0);
+      if (!c.isStatic && !alwaysDynamic(o) && now - c.lastChange >= SC.SETTLE * (1 + 3 * nCh)) { c.isStatic = true; needFull = true; }
+    });
+    casters.forEach(function(c, o) { if (!seen.has(o)) { if (c.isStatic) needFull = true; casters.delete(o); } });
+    SC.stats.casters = casters.size;
+    var ns = 0; casters.forEach(function(c) { if (c.isStatic) ns++; });
+    SC.stats.staticCasters = ns;
+  }
+  // 毎フレーム：動いた物を見つける。動かない物が動いたら、保存した影は描き直し
+  function check(now) {
+    casters.forEach(function(c, o) {
+      vals(o, scratch);
+      if (!same(c.vals, scratch)) {
+        var t = c.vals; c.vals = scratch; scratch = t;
+        if (c.isStatic) c.changes = (now - c.lastChange > 120 ? 0 : (c.changes || 0)) + 1;
+        c.lastChange = now;
+        if (c.isStatic) { c.isStatic = false; needFull = true; SC.stats.lastTrigger = o; }
+      }
+    });
+  }
+
+  // 動く物の影が入る範囲（影の下書きの上の四角、ピクセル）。前のフレームの範囲と合わせて使う
+  var sph = new THREE.Sphere(), v = new THREE.Vector3(), prevRect = null;
+  function dynamicRect(size) {
+    var cam = sun.shadow.camera, w = cam.right - cam.left, h = cam.top - cam.bottom;
+    var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, any = false;
+    casters.forEach(function(c, o) {
+      if (c.isStatic) return;
+      var g = o.geometry;
+      if (!g.boundingSphere) g.computeBoundingSphere();
+      sph.copy(g.boundingSphere).applyMatrix4(o.matrixWorld);
+      // 骨で動く物は形の箱が当てにならないので、大きめに
+      var r = sph.radius + (o.isSkinnedMesh ? 1.2 : 0.3);
+      v.copy(sph.center).applyMatrix4(cam.matrixWorldInverse);
+      var px = (v.x - cam.left) / w * size.x, py = (v.y - cam.bottom) / h * size.y;
+      var pr = r / w * size.x, prY = r / h * size.y;
+      x0 = Math.min(x0, px - pr); x1 = Math.max(x1, px + pr); y0 = Math.min(y0, py - prY); y1 = Math.max(y1, py + prY);
+      any = true;
+    });
+    var rect = any ? { x0: x0, y0: y0, x1: x1, y1: y1 } : null;
+    var out = rect;
+    if (prevRect) out = rect ? { x0: Math.min(rect.x0, prevRect.x0), y0: Math.min(rect.y0, prevRect.y0), x1: Math.max(rect.x1, prevRect.x1), y1: Math.max(rect.y1, prevRect.y1) } : prevRect;
+    prevRect = rect;
+    if (!out) return null;
+    var X0 = Math.max(0, Math.floor(out.x0) - 2), Y0 = Math.max(0, Math.floor(out.y0) - 2);
+    var X1 = Math.min(size.x, Math.ceil(out.x1) + 2), Y1 = Math.min(size.y, Math.ceil(out.y1) + 2);
+    if (X1 <= X0 || Y1 <= Y0) return null;
+    return new THREE.Vector4(X0, Y0, X1 - X0, Y1 - Y0);
+  }
+
+  // 影の下書きを、決めた物だけで描く（keep：描く物かどうか）。clear=false なら今の中身の上に描く
+  // （three.js の影の処理は、メインの描画の中からしか呼べないので、元の処理 origSM を使う）
+  var noClear = function() {}, origSM = renderer.shadowMap.render, curLights = null, curCam = null;
+  function renderShadow(keep, clear, onlyStaticOff) {
+    var saved = [];
+    if (onlyStaticOff) {
+      // 動く物だけ描く：動かない物（一覧にある物）だけ消せばよい（全部を調べなくてすむ）
+      casters.forEach(function(c, o) { if (c.isStatic && o.castShadow) { o.castShadow = false; saved.push(o); } });
+    } else {
+      window.scene.traverse(function(o) { if ((o.isMesh || o.isLine || o.isPoints) && o.castShadow && !keep(o)) { o.castShadow = false; saved.push(o); } });
+    }
+    var sm = renderer.shadowMap, origClear = renderer.clear;
+    if (!clear) renderer.clear = noClear;
+    try {
+      sm.needsUpdate = true;
+      origSM.call(sm, curLights, window.scene, curCam);
+    } finally {
+      renderer.clear = origClear;
+      sm.needsUpdate = false;
+      for (var i = 0; i < saved.length; i++) saved[i].castShadow = true;
+    }
+  }
+  function drawQuad(mat, tex, target) {
+    quad.material = mat; mat.uniforms.tMap.value = tex;
+    var prev = renderer.getRenderTarget(), ac = renderer.autoClear;
+    renderer.autoClear = false;
+    renderer.setRenderTarget(target);
+    renderer.render(quadScene, quadCam);
+    renderer.setRenderTarget(prev);
+    renderer.autoClear = ac;
+  }
+
+  // 1フレームの影の準備（メインの描画の直前）：使い回せるか、描き直しが要るかを決める
+  var active = false;
+  function plan(now) {
+    var sm = renderer.shadowMap;
+    if (!SC.enabled || !sm.enabled || !sun.castShadow || !sun.visible || otherShadowLights()) {
+      sm.autoUpdate = true; needFull = true; return false;
+    }
+    sm.autoUpdate = false;
+    if (now - lastScan >= SC.SCAN) scan(now);
+    check(now);
+    var ls = lightSnap();
+    if (!lightVals || !same(lightVals, ls)) { lightVals = ls; needFull = true; }
+    var map = sun.shadow.map;
+    if (!map || !cacheRT || cacheRT.width !== map.width || cacheRT.height !== map.height) needFull = true;
+    return true;
+  }
+  // メインの描画の中で、three.js が影を描くところ（ここで使い回しの絵を作る）
+  renderer.shadowMap.render = function(lights, sc, cam) {
+    if (!active || sc !== window.scene) return origSM.call(this, lights, sc, cam);
+    active = false;
+    curLights = lights; curCam = cam;
+    try { draw(); }
+    catch (e) {
+      console.warn('shadow cache', e);
+      SC.enabled = false; this.autoUpdate = true; this.needsUpdate = true;
+      origSM.call(this, lights, sc, cam);
+    }
+  };
+  function draw() {
+    var map = sun.shadow.map;
+
+    if (needFull) {
+      // 動かない物だけの影を描いて保存
+      map && (map.scissorTest = false);
+      renderShadow(function(o) { var c = casters.get(o); return !!(c && c.isStatic); }, true);
+      map = sun.shadow.map;
+      if (!cacheRT || cacheRT.width !== map.width || cacheRT.height !== map.height) {
+        if (cacheRT) cacheRT.dispose();
+        cacheRT = new THREE.WebGLRenderTarget(map.width, map.height, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, format: THREE.RGBAFormat, depthBuffer: false, stencilBuffer: false });
+      }
+      drawQuad(copyMat, map.texture, cacheRT);
+      needFull = false; prevRect = null;
+      SC.stats.full++;
+      // 動く物の影をのせる
+      renderShadow(null, false, true);
+      dynamicRect({ x: map.width, y: map.height });
+      return;
+    }
+    // 保存した影を、動く物のまわりだけ書き戻して、動く物の影をのせる
+    var rect = dynamicRect({ x: map.width, y: map.height });
+    if (!rect) return;
+    map.scissor.copy(rect); map.scissorTest = true;
+    try {
+      drawQuad(blitMat, cacheRT.texture, map);
+      renderShadow(null, false, true);
+    } finally {
+      map.scissorTest = false;
+    }
+    SC.stats.lastRect = rect.z + 'x' + rect.w;
+  }
+
+  // メインの描画：見えているステージだけ位置を計算し、影を準備してから描く
+  SC.renderMain = function(r, baseRender, args) {
+    var sc = window.scene;
+    try {
+      sc.children.forEach(function(ch) { if (ch.visible) ch.updateMatrixWorld(); });
+      active = plan(performance.now() / 1000);
+      SC.stats.frames++;
+    } catch (e) {
+      console.warn('shadow cache', e);
+      SC.enabled = false; active = false; renderer.shadowMap.autoUpdate = true;
+      return baseRender.apply(r, args);
+    }
+    var au = sc.autoUpdate;
+    sc.autoUpdate = false;
+    try { return baseRender.apply(r, args); } finally { sc.autoUpdate = au; active = false; }
   };
 })();
 </script>
@@ -8294,12 +8556,25 @@ animateLoop();
     if (!THREE.RGBELoader) return;
     var pmrem = new THREE.PMREMGenerator(window.renderer);
     pmrem.compileEquirectangularShader();
-    Object.keys(ENVS).forEach(function(stage) {
-      new THREE.RGBELoader().setDataType(THREE.UnsignedByteType).load(base + 'tex/' + ENVS[stage], function(hdr) {
-        P.envs[stage] = pmrem.fromEquirectangular(hdr).texture;
+    // 今いる場所の映り込みを先に読み、ほかの場所は1つずつ間をあけて読む（作るたびに画面が一瞬止まるので散らす）。
+    // まだ読んでいない場所へ移ったら、その場所を先にする
+    var left = Object.keys(ENVS), busy = false;
+    function next() {
+      if (busy || !left.length) return;
+      var st = window.state, cur = st && st.cameraStage;
+      var k = left.indexOf(cur) >= 0 ? cur : left[0];
+      left.splice(left.indexOf(k), 1);
+      busy = true;
+      new THREE.RGBELoader().setDataType(THREE.UnsignedByteType).load(base + 'tex/' + ENVS[k], function(hdr) {
+        P.envs[k] = pmrem.fromEquirectangular(hdr).texture;
         hdr.dispose();
-      });
-    });
+        busy = false;
+        setTimeout(next, 5000);
+      }, undefined, function() { busy = false; setTimeout(next, 5000); });
+    }
+    next();
+    // 場所が変わったときに、その場所がまだならすぐ読む
+    setInterval(function() { var st = window.state; if (st && left.indexOf(st.cameraStage) >= 0) next(); }, 1000);
   }
 
   var lastStage = '';
@@ -11323,6 +11598,12 @@ animateLoop();
     recentIdles: []
   };
 
+  // 読み込みが終わるまで、箱のおじさんは見せない（最初に3頭身の姿が一瞬出ないように）。
+  // 読み込めなかったとき・20秒たっても来ないときだけ、箱のおじさんを出す
+  function showBox(on) { if (window.parts.pelvis) window.parts.pelvis.visible = on; }
+  showBox(false);
+  setTimeout(function() { if (!R.ready) showBox(true); }, 20000);
+
   // 待機中にランダムに選ぶ動き（気分で重みを変える）
   var IDLE_SETS = {
     normal:  ['idle_neutral_01', 'idle_breathe_02', 'idle_look_around_01', 'idle_scratch_head_01', 'idle_touch_face_01'],
@@ -11558,6 +11839,9 @@ animateLoop();
       if (refs.mirrorOjisanNpc && refs.mirrorOjisanNpc.head) refs.mirrorOjisanNpc.head.visible = false;
       // ハンドサインは本物の指で作る（applyHandSign）。3頭身の大きな手は使わない
       if (refs.driverForegroundArm) refs.driverForegroundArm.visible = false;
+      // 運転中は、両手でハンドルのふち（左手は10時、右手は2時の位置）をにぎる。
+      // ハンドサインのギフト中は、左手はサインに使う（右手だけハンドル）
+      if (st.pose === 'drive' && refs.steeringWheel) gripWheel(refs.steeringWheel, !SIGNS[sg]);
       applyHandSign(sg, t);
     }
 
@@ -11642,6 +11926,37 @@ animateLoop();
   }
   // 電気のスイッチを押す・パネルを押すなど、ほかのファイルからも腕を伸ばせるようにする
   R.reachArm = reachArm;
+
+  // ハンドルをにぎる：ハンドルのふちの点（ハンドルの面の上、時計の 10時・2時）へ手首を寄せ、指先がふちを越えるように手を向ける
+  // ハンドルの形は car3d.html：半径 0.185m の輪、面は wheelPivot の XY 面。回すと手もいっしょに回る
+  R.WHEEL = { r: 0.185, leftAng: 150, rightAng: 30, toDriver: 0.045, inward: 0.035 };
+  var wv = new THREE.Vector3(), wn = new THREE.Vector3(), wc = new THREE.Vector3(), wq = new THREE.Quaternion();
+  function gripWheel(wheel, both) {
+    wheel.updateMatrixWorld(true);
+    wheel.getWorldPosition(wc);
+    wheel.getWorldQuaternion(wq);
+    wn.set(0, 0, 1).applyQuaternion(wq);                     // ハンドルの面の向き
+    // 運転手の側を向くように（頭の方へ）
+    var head = W('Bip01_Head');
+    if (wn.dot(head.clone().sub(wc)) < 0) wn.negate();
+    var down = new THREE.Vector3(0, -1, 0);
+    (both ? ['L', 'R'] : ['R']).forEach(function(s) {
+      var ang = (s === 'L' ? R.WHEEL.leftAng : R.WHEEL.rightAng) * Math.PI / 180;
+      wv.set(Math.cos(ang) * R.WHEEL.r, Math.sin(ang) * R.WHEEL.r, 0);
+      var rim = wheel.localToWorld(wv.clone());
+      // 手首は、ふちより少し手前（運転手側）・少し内側に置く（手のひらがふちにかぶさる）
+      var radial = rim.clone().sub(wc).normalize();
+      var wrist = rim.clone().addScaledVector(wn, R.WHEEL.toDriver).addScaledVector(radial, -R.WHEEL.inward);
+      // ひじは下・外向き
+      var out = radial.clone(); out.y = 0;
+      reachArm(s, wrist, down.clone().add(out.multiplyScalar(0.8)));
+      // 指先（中指の付け根）が、手首からふちの点の少し先へ向くように手首を回す
+      var hb = R.bones['Bip01_' + s + '_Hand'];
+      var cur = W('Bip01_' + s + '_Finger2').sub(W('Bip01_' + s + '_Hand')).normalize();
+      var want = rim.clone().addScaledVector(wn, -0.02).sub(W('Bip01_' + s + '_Hand')).normalize();
+      rotateWorld(hb, new THREE.Quaternion().setFromUnitVectors(cur, want));
+    });
+  }
   function curlFingers(prefix, s) {
     for (var f = 0; f <= 4; f++) {
       ['', '1', '2'].forEach(function(seg, si) {
@@ -11757,40 +12072,88 @@ animateLoop();
   var LEFT_HAND = { propShopBasket: true, propGroceryBag: true };
   var propPivots = [];
 
-  // 骨の向きに合わせると傾いてしまうので、毎フレーム手の位置にまっすぐ立てて置く
+  // 持ち方の種類
+  //  grip ：にぎって立てて持つ（ビール）                  … 手のひらの中に、まっすぐ立てる
+  //  flat ：手のひらにのせる（皿・フライパン・食材のトレー） … 手のひらの上に、水平にのせる
+  //  hang ：手から下げる（袋・かご・洗濯かご・シャツ・掃除機）… 上のはしを手に、下へ垂らす
+  //  tool ：細長い物をにぎる（包丁・はし・リモコン・スマホ・ちゅ〜る・スポンジ）
+  //         … にぎりこぶしの中に、いちばん長い向きを親指の向き（こぶしを横切る向き）にそろえる
+  var HOLD = {
+    propBeer: 'grip',
+    propEmptyPlate: 'flat', propFoodPlate: 'flat', propPan: 'flat', propIngredient: 'flat',
+    propGroceryBag: 'hang', propShopBasket: 'hang', propBasket: 'hang', propShirt: 'hang', propVacuum: 'hang',
+    propKnife: 'tool', propChopsticks: 'tool', propRemote: 'tool', propPhone: 'tool', propChuru: 'tool', propSponge: 'tool'
+  };
+
+  // 持ち物を、手の中のにぎる位置に置き直すための入れ物（ピボット）に入れる。
+  // 形の大きさ・中心は、持ち物そのものの向き（回転なし）で測る
   function moveProps() {
     PROP_KEYS.forEach(function(k) {
       var obj = window.parts[k];
       if (!obj) return;
-      var pivot = new THREE.Group();
-      window.ojisan.add(pivot);
-      // 持ち物の中心が手に来るように、元の位置のずれを打ち消す
       if (obj.parent) obj.parent.remove(obj);
       obj.position.set(0, 0, 0);
       obj.rotation.set(0, 0, 0);
-      pivot.add(obj);
+      obj.updateMatrixWorld(true);
       var wasVisible = obj.visible;
       obj.visible = true;
       var box = new THREE.Box3().setFromObject(obj);
       obj.visible = wasVisible;
-      var center = box.getCenter(new THREE.Vector3());
-      var size = box.getSize(new THREE.Vector3());
-      pivot.updateMatrixWorld(true);
-      var localCenter = pivot.worldToLocal(center.clone());
-      obj.position.sub(localCenter);
-      if (HANGING[k]) obj.position.y -= size.y / 2;
-      propPivots.push({ pivot: pivot, obj: obj, hand: LEFT_HAND[k] ? 'Bip01_L_Hand' : 'Bip01_R_Hand' });
+      var center = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3());
+      var pivot = new THREE.Group();
+      window.ojisan.add(pivot);
+      pivot.add(obj);
+      var kind = HOLD[k] || 'grip';
+      // にぎる点（ピボットの原点）に対する、持ち物の置き方
+      obj.position.copy(center).negate();
+      if (kind === 'flat') obj.position.y += size.y / 2 + 0.005;            // 手のひらの上にのせる
+      if (kind === 'hang') obj.position.y -= size.y / 2 - Math.min(0.03, size.y * 0.1);   // 上のはしを手に
+      // 細長い物のいちばん長い向き
+      var axis = new THREE.Vector3(1, 0, 0);
+      if (size.y >= size.x && size.y >= size.z) axis.set(0, 1, 0);
+      else if (size.z >= size.x && size.z >= size.y) axis.set(0, 0, 1);
+      propPivots.push({ pivot: pivot, obj: obj, kind: kind, size: size, axis: axis, left: !!LEFT_HAND[k] });
     });
   }
 
-  var tmpV = new THREE.Vector3();
+  // 毎フレーム：手の骨（手首）・中指と親指の付け根から、手のひらの中心と向きを求めて置く
+  var tmpV = new THREE.Vector3(), mid = new THREE.Vector3(), thumb = new THREE.Vector3(), fdir = new THREE.Vector3(), side = new THREE.Vector3();
+  var invQ = new THREE.Quaternion(), loc = new THREE.Vector3(), fl = new THREE.Vector3(), sl = new THREE.Vector3();
   function placeProps() {
+    var oj = window.ojisan;
     propPivots.forEach(function(p) {
-      var bone = R.bones[p.hand];
-      if (!bone || !p.obj.visible) return;
-      bone.getWorldPosition(tmpV);
-      window.ojisan.worldToLocal(tmpV);
-      p.pivot.position.copy(tmpV);
+      if (!p.obj.visible) return;
+      var s = p.left ? 'L' : 'R';
+      var hand = R.bones['Bip01_' + s + '_Hand'], fm = R.bones['Bip01_' + s + '_Finger2'], ft = R.bones['Bip01_' + s + '_Finger0'];
+      if (!hand) return;
+      hand.getWorldPosition(tmpV);
+      if (fm && ft) {
+        fm.getWorldPosition(mid); ft.getWorldPosition(thumb);
+        fdir.copy(mid).sub(tmpV);
+        var len = fdir.length(); fdir.normalize();
+        side.copy(thumb).sub(tmpV); side.addScaledVector(fdir, -side.dot(fdir)).normalize();
+        // 手のひらの中心：手首から中指の付け根までの 7割
+        tmpV.addScaledVector(fdir, len * 0.7);
+      } else {
+        fdir.set(0, -1, 0); side.set(1, 0, 0);
+      }
+      oj.updateMatrixWorld();
+      loc.copy(tmpV); oj.worldToLocal(loc);
+      p.pivot.position.copy(loc);
+      oj.getWorldQuaternion(invQ).invert();
+      fl.copy(fdir).applyQuaternion(invQ); sl.copy(side).applyQuaternion(invQ);
+      if (p.kind === 'tool') {
+        // いちばん長い向きを、こぶしを横切る向き（親指の向き）に
+        p.pivot.quaternion.setFromUnitVectors(p.axis, sl);
+      } else {
+        // 立てて持つ物は、おじさんの向きのまま水平に。のせる物は指の先の方へ少し出す
+        p.pivot.quaternion.set(0, 0, 0, 1);
+        if (p.kind === 'flat') {
+          var hx = fl.x, hz = fl.z, hl = Math.hypot(hx, hz) || 1;
+          var r = Math.max(p.size.x, p.size.z) * 0.3;
+          p.pivot.position.x += hx / hl * r; p.pivot.position.z += hz / hl * r;
+        }
+      }
     });
   }
 
@@ -11826,6 +12189,7 @@ animateLoop();
       if (window.addLog) window.addLog('🧍 実写系のおじさんを読み込みました（動き ' + gltf.animations.length + ' 種類）');
     }, undefined, function(err) {
       console.warn('ojisan model load failed', err);
+      showBox(true);
       if (window.addLog) window.addLog('⚠️ おじさんのモデルを読み込めませんでした（今までの姿で動きます）');
     });
   }
@@ -12642,6 +13006,7 @@ animateLoop();
       [fc.a, fc.b, fc.c].forEach(function(n) { var d = Math.hypot(P[n][0] - x, P[n][1] - y, P[n][2] - h.point.z); if (d < bd) { bd = d; best = n; } });
       return [x, y, h.point.z, best];
     }
+    var bindInv = body.bindMatrix.clone().invert();
     var T = OF.TIE2, ROWS = 26, COLS = 5;
     var y0 = -torso * T.top, y1 = -torso * T.bottom;
     var verts = [], sIdx = [], sWt = [];
@@ -12659,7 +13024,9 @@ animateLoop();
         var fp = front(cx, yy);
         if (!fp) return null;
         var bp = nk.clone().addScaledVector(sideV, cx).addScaledVector(upV, yy).addScaledVector(fwdV, fp[2] + (T.lift + knot) * k);
-        bp.applyMatrix4(body.bindMatrixInverse);
+        // bindMatrixInverse は three.js が毎フレーム「今の位置」に書きかえるので使わない（体の形がくずれる原因）。
+        // 形を作ったときの bindMatrix の逆行列を使う
+        bp.applyMatrix4(bindInv);
         verts.push(bp.x, bp.y, bp.z);
         for (var q = 0; q < 4; q++) { sIdx.push(comp(si, fp[3], q)); sWt.push(comp(sw, fp[3], q)); }
       }
@@ -12814,7 +13181,9 @@ animateLoop();
       if (a && e && idx[t[0]] !== undefined) tgt[idx[t[0]]] = { a: a, dir: e.clone().sub(a).normalize(), w: t[2], d: t[3] };
     });
     var geo = mesh.geometry, pos = geo.attributes.position, si = geo.attributes.skinIndex, sw = geo.attributes.skinWeight;
-    var bm = mesh.bindMatrix, bmi = mesh.bindMatrixInverse, v = new THREE.Vector3(), off = new THREE.Vector3(), rel = new THREE.Vector3();
+    // bindMatrixInverse は three.js が毎フレーム「今の位置」に書きかえる（attached のとき）ので、
+    // ここで使うと体の頂点が今の向き・大きさの分だけずれて、腕や手が大きく引きのばされる。bindMatrix の逆行列を使う
+    var bm = mesh.bindMatrix, bmi = bm.clone().invert(), v = new THREE.Vector3(), off = new THREE.Vector3(), rel = new THREE.Vector3();
     for (var i = 0; i < pos.count; i++) {
       v.fromBufferAttribute(pos, i).applyMatrix4(bm);
       off.set(0, 0, 0);
