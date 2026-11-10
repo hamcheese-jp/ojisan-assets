@@ -590,7 +590,7 @@
       <button onclick="setCameraView('front')">👤 おじさんアップ</button>
     </div>
     <!-- 動作の様子（版・1秒に描いた回数・1回の時間・画面の大きさ）：重いときの確認用 -->
-    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 10:48</div>
+    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 10:59</div>
     <div class="preset-btns" style="margin-top:4px;">
       <button onclick="jumpTo('weekday', 8, 25)" style="border-color:#38bdf8;">🚗 通勤(車内サイン)</button>
       <button onclick="jumpTo('weekday', 10, 30)" style="border-color:#38bdf8;">🏢 会社オフィス</button>
@@ -5953,6 +5953,13 @@ window.updateOuterStagesAnimation = function(t, st) {
       gltf.animations.forEach(function(c) {
         // 足あと用の骨（Bip01_Footsteps）は人物側のファイルにないので、動きからも外す（残すと体ごと倒れる）
         c.tracks = c.tracks.filter(function(tr) { return !/Footsteps/.test(tr.name); });
+        // 歩く動きの「前に進む分」を取りのぞく（進むのは patrol などの位置の計算。両方あると、少し進んでからパッと戻る）
+        c.tracks.forEach(function(tr) {
+          if (tr.name !== 'Bip01.position') return;
+          var v = tr.values, n = v.length / 3;
+          if (Math.hypot(v[(n - 1) * 3] - v[0], v[(n - 1) * 3 + 2] - v[2]) < 0.15) return;
+          for (var i = 0; i < n; i++) { v[i * 3] = v[0]; v[i * 3 + 2] = v[2]; }
+        });
         X.clips[c.name] = c;
       });
       X.animsReady = true;
@@ -11896,7 +11903,22 @@ animateLoop();
   // ---------------------------------------------------------------------------
   // 毎フレーム：動きを進め、口と目を動かす
   // ---------------------------------------------------------------------------
-  var lastT = null;
+  var lastT = null, tmpScale = new THREE.Vector3();
+  // 歩く動きの「前に進む分」を取りのぞく。進むのは道のりの計算（room3d.html）がするので、
+  // 動きにも前進が入っていると、体が少し前へすべってから、くり返しの最初でパッと後ろへ戻って見える
+  // （上下のゆれは残す）。進む距離は userData.walkTravel に覚えて、足の運びの速さ合わせに使う
+  function stripRootTravel(c) {
+    c.tracks.forEach(function(tr) {
+      if (tr.name !== 'Bip01.position') return;
+      var v = tr.values, n = v.length / 3;
+      var dx = v[(n - 1) * 3] - v[0], dz = v[(n - 1) * 3 + 2] - v[2], travel = Math.hypot(dx, dz);
+      if (travel < 0.15) return;
+      for (var i = 0; i < n; i++) { v[i * 3] = v[0]; v[i * 3 + 2] = v[2]; }
+      c.userData = c.userData || {};
+      c.userData.walkTravel = travel;
+    });
+  }
+  R.stripRootTravel = stripRootTravel;
   function update(t) {
     if (!R.ready) return;
     var st = window.state;
@@ -11905,6 +11927,17 @@ animateLoop();
 
     var sel = choose(st, t);
     play(sel);
+    // 歩く動きは、足の運びの速さを実際に進む速さに合わせる（足がすべって見えないように）
+    (R.current || []).forEach(function(a) {
+      var c = a.getClip(), u = c.userData || {};
+      if (!u.walkTravel) { if (a.timeScale !== 1) a.timeScale = 1; return; }
+      // この動き本来の速さ（m/秒）＝ 1回の動きで進む距離 × 体の大きさ ÷ 長さ
+      var bip = R.bones['Bip01'], sc = bip && bip.parent ? bip.parent.getWorldScale(tmpScale).z : 1;
+      var nat = u.walkTravel * sc / c.duration;
+      var moving = st.pathQueue && st.pathQueue.length > 0;
+      var spd = moving ? ((st.emotion === 'panic' ? window.WALK_SPEED_PANIC : window.WALK_SPEED) || 0.0105) * 60 * (window.FRAME_SCALE || 1) : nat;
+      a.timeScale = Math.max(0.45, Math.min(1.6, spd / nat));
+    });
     R.mixer.update(dt);
 
     R.root.position.set(0, sel.y, sel.dz);
@@ -12299,7 +12332,7 @@ animateLoop();
       R.root = holder;
       window.ojisan.add(holder);
       R.mixer = new THREE.AnimationMixer(model);
-      gltf.animations.forEach(function(c) { R.clips[c.name] = c; });
+      gltf.animations.forEach(function(c) { stripRootTravel(c); R.clips[c.name] = c; });
 
       // 箱のおじさんを隠す
       if (window.parts.pelvis) window.parts.pelvis.visible = false;
