@@ -590,7 +590,7 @@
       <button onclick="setCameraView('front')">👤 おじさんアップ</button>
     </div>
     <!-- 動作の様子（版・1秒に描いた回数・1回の時間・画面の大きさ）：重いときの確認用 -->
-    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 12:17</div>
+    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 13:56</div>
     <div class="preset-btns" style="margin-top:4px;">
       <button onclick="jumpTo('weekday', 8, 25)" style="border-color:#38bdf8;">🚗 通勤(車内サイン)</button>
       <button onclick="jumpTo('weekday', 10, 30)" style="border-color:#38bdf8;">🏢 会社オフィス</button>
@@ -1652,6 +1652,45 @@ window.findWaypointPath = function(startNode, goalNode, customStartPos) {
   return [{ name: goalNode, x: g.x, z: g.z, rotY: g.rotY }];
 };
 
+// ----------------------------------------------------------------------------
+// 家の外（会社・お店・車）での尿意（1秒に1回呼ぶ）
+// ・80% をこえたら、ときどき「そわそわ」したセリフ
+// ・会社・お店で 100% になったら、トイレ休憩（stages3d.html が出口まで歩かせ、しばらく画面から消えて、戻ってくる）
+// ・車ではトイレに行けないので「次のコンビニまで我慢…」。着いた先（会社・お店・家）で行く
+// ----------------------------------------------------------------------------
+var AWAY_TOILET_LINES = {
+  fidget_OFFICE: ['…（もじもじ）…この資料、終わったらトイレ行こ…', '…やべ、さっきのコーヒーが効いてきた…', '…会議が終わるまでもつかな…'],
+  fidget_SUPER: ['…（もじもじ）…早く買って帰らないと…', '…お店のトイレ、どこだったっけ…', '…やばい、ちょっとトイレ行きたくなってきた…'],
+  fidget_CAR: ['…うぅ、トイレ…次のコンビニまで我慢…', '…信号よ、早く青になってくれ…トイレが…', '…なんで出る前に行っとかなかったんだ俺…'],
+  go_OFFICE: ['…すみません、ちょっとトイレ行ってきます！', '…ちょ、ちょっと失礼！すぐ戻ります！'],
+  go_SUPER: ['…カゴ、ちょっとここ置かせて！トイレ借ります！', '…すいません、お手洗いお借りします！'],
+  back: ['…ふぅ〜、すっきりした。さて、続きだ', '…危なかった…間に合ってよかったわ', '…ただいま。いや〜すっきり！']
+};
+window.pickAwayToiletLine = function(key) {
+  var pool = AWAY_TOILET_LINES[key] || AWAY_TOILET_LINES.back;
+  return pool[Math.floor(Math.random() * pool.length)];
+};
+window.updateAwayBladder = function(st) {
+  var stage = st.cameraStage;
+  // 場面が変わったら、トイレ休憩は終わり（戻ってきたことにする）
+  if (st.stageToilet && st.stageToilet.stage !== stage) {
+    if (st.stageToilet.phase !== 'go') st.bladder = 0;
+    st.stageToilet = null;
+  }
+  if (st.stageToilet || st.matsukenTimer > 0 || st.stageGiftTimer > 0) return;
+  var now = Date.now();
+  // そわそわ（80%〜、45秒に1回くらい）
+  if (st.bladder >= 80 && (!st.lastFidgetAt || now - st.lastFidgetAt > 45000) && Math.random() < 0.25) {
+    st.lastFidgetAt = now;
+    window.showSpeech(window.pickAwayToiletLine('fidget_' + stage), 3.5, 'panic');
+  }
+  // 会社・お店：100% でトイレ休憩（電話中は電話が終わってから）
+  if (st.bladder >= 100 && (stage === 'OFFICE' || stage === 'SUPER') && st.officePhase !== 'phone_call') {
+    st.stageToilet = { stage: stage, phase: 'go', step: 0, until: 0 };
+    window.showSpeech(window.pickAwayToiletLine('go_' + stage), 3.5, 'panic');
+  }
+};
+
 window.triggerImmediateToilet = function() {
   window.state.bladder = 100;
   if (window.state.cameraStage !== 'HOME') {
@@ -2620,7 +2659,10 @@ setInterval(function() {
   window.evaluateMacroSchedule();
   window.updateCatBehaviorTick();
 
-  window.state.bladder = Math.min(100, window.state.bladder + 0.35);
+  // 尿意：家では今まで通り。会社・お店・車では、ゆっくり上がる（30分に1回くらい行きたくなる）
+  var stNow = window.state, atHome = stNow.cameraStage === 'HOME';
+  stNow.bladder = Math.min(100, stNow.bladder + (atHome ? 0.35 : 0.06));
+  if (!atHome) window.updateAwayBladder(stNow);
   window.state.hunger = Math.max(0, window.state.hunger - 0.12);
 
   if (window.state.cameraStage === 'HOME') {
@@ -5251,6 +5293,40 @@ function stageWalkStep(st) {
   var base = (st.emotion === 'panic') ? (window.WALK_SPEED_PANIC || 0.017) : (window.WALK_SPEED || 0.0105);
   return base * (window.FRAME_SCALE || 1);
 }
+// 会社・お店のトイレ休憩（logic.html の updateAwayBladder が st.stageToilet を作る）
+// 出口まで歩く（go）→ 画面から消えて25秒（away）→ 同じ道を戻る（back）→ いつもの動きへ
+// 道は、家具を通らないよう、まず空いている通路に出てから外へ：
+//   会社：机の後ろの通路（z -0.95）→ 左の通路（x -2.25）→ 手前の外（画面の外 z 4.8）
+//   お店：レジ前の通路（z 0.95）→ 左の通路（x -3.3）→ 手前の外
+function stageToiletRoute(stage, pos) {
+  if (stage === 'OFFICE') return [{ x: pos.x, z: -0.95 }, { x: -2.25, z: -0.95 }, { x: -2.25, z: 4.8 }];
+  var sx = Math.max(-0.9, pos.x);
+  return [{ x: sx, z: pos.z }, { x: sx, z: 0.95 }, { x: -3.3, z: 0.95 }, { x: -3.3, z: 4.8 }];
+}
+function stageToiletMove(st, pos, stage) {
+  var tb = st.stageToilet;
+  if (!tb || tb.stage !== stage) return false;
+  var oj = window.ojisan;
+  if (!tb.route) tb.route = stageToiletRoute(stage, pos);
+  if (tb.phase === 'away') {
+    if (Date.now() < tb.until) { oj.visible = false; return true; }
+    tb.phase = 'back'; tb.step = 0; st.bladder = 0;
+    window.showSpeech(window.pickAwayToiletLine('back'), 3.5, 'relaxed');
+  }
+  var pts = (tb.phase === 'go') ? tb.route : tb.route.slice(0, -1).reverse();
+  if (tb.step >= pts.length) {
+    if (tb.phase === 'go') { tb.phase = 'away'; tb.until = Date.now() + 25000; oj.visible = false; return true; }
+    st.stageToilet = null;
+    return false;
+  }
+  var p = pts[tb.step], dx = p.x - pos.x, dz = p.z - pos.z, d = Math.hypot(dx, dz);
+  if (d <= 0.08) { pos.x = p.x; pos.z = p.z; tb.step++; }
+  else { var s = Math.min(d, stageWalkStep(st)); pos.x += dx / d * s; pos.z += dz / d * s; oj.rotation.y = Math.atan2(dx, dz); }
+  oj.position.set(pos.x, 0, pos.z);
+  st.pose = 'walk';
+  st.handProp = 'none';
+  return true;
+}
 // 車の速さ（60コマの1フレームに進む m）。0.16 ≒ 時速35km。外の景色が流れる速さもこれで決まる
 var CAR_SPEED = 0.16, ONCOMING_SPEED = 0.15;
 window.updateOuterStagesAnimation = function(t, st) {
@@ -5473,6 +5549,9 @@ window.updateOuterStagesAnimation = function(t, st) {
       return;
     }
 
+    // トイレ休憩中は、その動きだけ
+    if (stageToiletMove(st, refs.officePos, 'OFFICE')) return;
+
     var targetOffX = 0.0, targetOffZ = -0.24, targetOffRot = 0;
     if (st.officePhase === 'copy_machine') {
       targetOffX = 2.15; targetOffZ = 0.60; targetOffRot = Math.PI / 2;
@@ -5624,6 +5703,9 @@ window.updateOuterStagesAnimation = function(t, st) {
       st.pose = 'matsuken_dance';
       return;
     }
+
+    // トイレ休憩中は、その動きだけ
+    if (stageToiletMove(st, refs.superPos, 'SUPER')) return;
 
     var targetSupX = -2.4, targetSupZ = -0.8, targetSupRot = Math.PI;
     if (st.superPhase === 'meat_fish') {
@@ -15948,6 +16030,8 @@ window.toggleGaugeHudVisibility = function() {
   // 今の状況
   // ---------------------------------------------------------------------------
   function situation(st) {
+    // 会社・お店でトイレに行っている間は、家のトイレ中と同じ（小中はお礼だけ、大とサンバは戻ってから）
+    if (st.stageToilet && st.stageToilet.phase === 'away') return 'toilet';
     if (st.cameraStage === 'OFFICE') {
       if (st.officePhase === 'phone_call') return 'phone';
       if (st.officePhase === 'water_break' || st.officePhase === 'copy_machine') return 'break';
