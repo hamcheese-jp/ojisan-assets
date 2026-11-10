@@ -564,7 +564,7 @@
       <button onclick="setCameraView('front')">👤 おじさんアップ</button>
     </div>
     <!-- 動作の様子（版・1秒に描いた回数・1回の時間・画面の大きさ）：重いときの確認用 -->
-    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 10:20</div>
+    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 10:27</div>
     <div class="preset-btns" style="margin-top:4px;">
       <button onclick="jumpTo('weekday', 8, 25)" style="border-color:#38bdf8;">🚗 通勤(車内サイン)</button>
       <button onclick="jumpTo('weekday', 10, 30)" style="border-color:#38bdf8;">🏢 会社オフィス</button>
@@ -5674,6 +5674,8 @@ window.updateOuterStagesAnimation = function(t, st) {
         return baseReaction.apply(this, arguments);
       };
       X.list.push(npc);
+      // 本物の人の姿が読みこまれるまで、3頭身の箱の人は見せない（読みこめなかったときだけ出す）
+      if (npc.pelvis) npc.pelvis.visible = false;
     }
     return npc;
   };
@@ -5914,6 +5916,7 @@ window.updateOuterStagesAnimation = function(t, st) {
       done();
     }, undefined, function(err) {
       console.warn('extra load failed', npc.real.avatar, err);
+      if (npc.pelvis) npc.pelvis.visible = true;
       done();
     });
   }
@@ -8640,12 +8643,21 @@ animateLoop();
 
   function start(modelUrl) {
     var base = modelUrl.replace(/[^\/]*$/, '');
+    // 床・壁の写真（約13MB）は、おじさんの姿を先に読みこんでから（回線を取り合って、おじさんが出るのが遅れないように）
+    var waited = 0;
+    (function waitOjisan() {
+      var R = window.OJISAN_REAL;
+      if (R && !R.ready && waited < 15000) { waited += 300; setTimeout(waitOjisan, 300); return; }
+      startTextures(base);
+    })();
+    loadEnvs(base);
+  }
+  function startTextures(base) {
     Promise.all(Object.keys(SETS).map(function(k) { return loadSet(base, k); })).then(function() {
       var n = swapAll();
       P.done = true;
       if (window.addLog) window.addLog('🧱 写真の素材に差し替えました（' + Object.keys(P.loaded).length + ' 種類・' + n + ' か所）');
     });
-    loadEnvs(base);
   }
 
   if (typeof google !== 'undefined' && google.script && google.script.run) {
@@ -11649,11 +11661,10 @@ animateLoop();
     recentIdles: []
   };
 
-  // 読み込みが終わるまで、箱のおじさんは見せない（最初に3頭身の姿が一瞬出ないように）。
-  // 読み込めなかったとき・20秒たっても来ないときだけ、箱のおじさんを出す
+  // 読み込みが終わるまで、箱のおじさんは見せない（最初に3頭身の姿が出ないように）。
+  // 読み込めなかったときだけ、箱のおじさんを出す（回線が遅くて時間がかかっても、出さずに待つ）
   function showBox(on) { if (window.parts.pelvis) window.parts.pelvis.visible = on; }
   showBox(false);
-  setTimeout(function() { if (!R.ready) showBox(true); }, 20000);
 
   // 待機中にランダムに選ぶ動き（気分で重みを変える）
   var IDLE_SETS = {
