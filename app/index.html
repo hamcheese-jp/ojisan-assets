@@ -590,7 +590,7 @@
       <button onclick="setCameraView('front')">👤 おじさんアップ</button>
     </div>
     <!-- 動作の様子（版・1秒に描いた回数・1回の時間・画面の大きさ）：重いときの確認用 -->
-    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 11:05</div>
+    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 11:28</div>
     <div class="preset-btns" style="margin-top:4px;">
       <button onclick="jumpTo('weekday', 8, 25)" style="border-color:#38bdf8;">🚗 通勤(車内サイン)</button>
       <button onclick="jumpTo('weekday', 10, 30)" style="border-color:#38bdf8;">🏢 会社オフィス</button>
@@ -4545,7 +4545,7 @@ window.outerStageRefs = {
   naviCanvas: null,
   naviCtx: null,
   naviTexture: null,
-  carSpeedCurrent: 0.38,
+  carSpeedCurrent: 0.16,
 
   // 🚗 車内専用の運転手（5本指ハンドサイン）＆ルームミラー越し3頭身キメ顔
   driverForegroundArm: null,
@@ -5246,6 +5246,13 @@ window.buildDetailedOuterStages = function(carGroup, officeGroup, superGroup, da
   }
 };
 
+// 会社・お店で歩くときの1フレームの歩幅。家（room3d.html の WALK_SPEED）と同じ速さで、時間で進める
+function stageWalkStep(st) {
+  var base = (st.emotion === 'panic') ? (window.WALK_SPEED_PANIC || 0.017) : (window.WALK_SPEED || 0.0105);
+  return base * (window.FRAME_SCALE || 1);
+}
+// 車の速さ（60コマの1フレームに進む m）。0.16 ≒ 時速35km。外の景色が流れる速さもこれで決まる
+var CAR_SPEED = 0.16, ONCOMING_SPEED = 0.15;
 window.updateOuterStagesAnimation = function(t, st) {
   var refs = window.outerStageRefs;
   var sgEff = (st.stageGiftTimer > 0) ? st.stageGiftEffect : null;
@@ -5263,7 +5270,8 @@ window.updateOuterStagesAnimation = function(t, st) {
     st.pose = (st.matsukenTimer > 0) ? 'matsuken_dance' : 'drive';
 
     var interZ = refs.intersectionGroup ? refs.intersectionGroup.position.z : -20;
-    var targetSpd = 0.42;
+    var targetSpd = CAR_SPEED;
+    var fs = window.FRAME_SCALE || 1;
 
     if (st.isRedLight) {
       if (interZ > -5.0 || interZ < -32.0) {
@@ -5275,14 +5283,14 @@ window.updateOuterStagesAnimation = function(t, st) {
         targetSpd = 0.0;
         refs.carSpeedCurrent = 0.0;
       } else {
-        targetSpd = Math.min(0.38, distToStop * 0.08);
+        targetSpd = Math.min(CAR_SPEED * 0.9, distToStop * 0.035);
       }
     }
 
     refs.carSpeedCurrent += (targetSpd - refs.carSpeedCurrent) * 0.12;
 
     if (refs.intersectionGroup) {
-      refs.intersectionGroup.position.z += refs.carSpeedCurrent;
+      refs.intersectionGroup.position.z += refs.carSpeedCurrent * fs;
       if (refs.intersectionGroup.position.z > 8.0) {
         refs.intersectionGroup.position.z = -68.0;
       }
@@ -5373,23 +5381,23 @@ window.updateOuterStagesAnimation = function(t, st) {
     window.updateCarNaviTexture(t, st);
 
     refs.roadLines.forEach(function(l) {
-      l.position.z += refs.carSpeedCurrent;
+      l.position.z += refs.carSpeedCurrent * fs;
       if (l.position.z > 12) l.position.z -= 88;
     });
     refs.trees.forEach(function(tr) {
-      tr.position.z += refs.carSpeedCurrent;
+      tr.position.z += refs.carSpeedCurrent * fs;
       if (tr.position.z > 12) tr.position.z -= 85;
     });
     refs.buildings.forEach(function(b) {
-      b.position.z += refs.carSpeedCurrent;
+      b.position.z += refs.carSpeedCurrent * fs;
       if (b.position.z > 14) b.position.z -= 85;
     });
     refs.oncomingCars.forEach(function(oc) {
-      oc.position.z += (refs.carSpeedCurrent + 0.36);
+      oc.position.z += (refs.carSpeedCurrent + ONCOMING_SPEED) * fs;
       if (oc.position.z > 15) oc.position.z = -65 - Math.random() * 25;
     });
     refs.pedestrians.forEach(function(pd, idx) {
-      pd.group.position.z += (refs.carSpeedCurrent + 0.035);
+      pd.group.position.z += (refs.carSpeedCurrent + 0.035) * fs;
       if (pd.group.position.z > 12) pd.group.position.z = -55 - idx * 20;
       pd.legL.rotation.x = Math.sin(t * 7 + idx) * 0.4;
       pd.legR.rotation.x = -Math.sin(t * 7 + idx) * 0.4;
@@ -5480,8 +5488,9 @@ window.updateOuterStagesAnimation = function(t, st) {
     var odz = targetOffZ - refs.officePos.z;
     var odist = Math.hypot(odx, odz);
     if (odist > 0.08 && !isLoudOfficeGift) {
-      refs.officePos.x += (odx / odist) * 0.045;
-      refs.officePos.z += (odz / odist) * 0.045;
+      var oStep = Math.min(odist, stageWalkStep(st));
+      refs.officePos.x += (odx / odist) * oStep;
+      refs.officePos.z += (odz / odist) * oStep;
       window.ojisan.position.set(refs.officePos.x, 0, refs.officePos.z);
       window.ojisan.rotation.y = Math.atan2(odx, odz);
       st.pose = 'walk';
@@ -5634,8 +5643,9 @@ window.updateOuterStagesAnimation = function(t, st) {
     var sdz = targetSupZ - refs.superPos.z;
     var sdist = Math.hypot(sdx, sdz);
     if (sdist > 0.08 && !isShopPrank) {
-      refs.superPos.x += (sdx / sdist) * 0.048;
-      refs.superPos.z += (sdz / sdist) * 0.048;
+      var sStep = Math.min(sdist, stageWalkStep(st));
+      refs.superPos.x += (sdx / sdist) * sStep;
+      refs.superPos.z += (sdz / sdist) * sStep;
       window.ojisan.position.set(refs.superPos.x, 0, refs.superPos.z);
       window.ojisan.rotation.y = Math.atan2(sdx, sdz);
       st.pose = 'walk';
@@ -5706,10 +5716,27 @@ window.updateOuterStagesAnimation = function(t, st) {
     return npc;
   };
 
-  // 男女で同じ名前の動きがあればそれを、なければもう片方を使う
+  // 男女で同じ名前の動きがあればそれを、なければもう片方を、それもなければおじさんの動き（同じ骨の作り）を使う
   function clip(npc, name) {
     var a = (npc.real.female ? 'f_' : 'm_') + name, b = (npc.real.female ? 'm_' : 'f_') + name;
-    return X.clips[a] || X.clips[b] || null;
+    var R = window.OJISAN_REAL;
+    return X.clips[a] || X.clips[b] || borrowed(R && R.clips && R.clips[name]) || null;
+  }
+  // おじさんの動きを借りるときは、足あと用の骨（Bip01_Footsteps）の動きを外した写しを使う
+  // （エキストラの体にはこの骨がなく、残すと体ごと床に倒れる）
+  var borrowCache = {};
+  function borrowed(c) {
+    if (!c) return null;
+    if (!borrowCache[c.name]) {
+      borrowCache[c.name] = new THREE.AnimationClip('npc_' + c.name, c.duration, c.tracks.filter(function(tr) { return !/Footsteps/.test(tr.name); }));
+    }
+    return borrowCache[c.name];
+  }
+  // 人ごとの「くせ」：動きの長さ・歩く速さ・立ち止まる長さを少しずつ変えて、みんなが同じ調子で動かないように
+  function quirk(npc) {
+    var r = npc.real;
+    if (!r.quirk) r.quirk = { pace: 0.8 + Math.random() * 0.4, linger: 0.7 + Math.random() * 0.8 };
+    return r.quirk;
   }
 
   // 上半身だけ・下半身だけの動きを作る（カートを押しながら歩く、など）
@@ -5738,6 +5765,21 @@ window.updateOuterStagesAnimation = function(t, st) {
     f_shock: ['gestic_talk_nervous_01'],
     m_look: ['idle_look_around_01', 'idle_neutral_01', 'idle_neutral_01'],
     f_look: ['idle_look_around_01', 'idle_look_around_02'],
+    // 会社の席（すわったまま）：机に向かう姿が中心で、ときどき見回す・頭をかく・あくび・背もたれによりかかる
+    m_desk: ['sit_table_idle_neutral_01', 'sit_table_idle_neutral_01', 'sit_table_breathe_01', 'sit_table_idle_look_around', 'sit_table_idle_scratch_head', 'sit_chair_idle_yawn', 'sit_chair_idle_relaxed_01'],
+    f_desk: ['sit_table_idle_neutral_01', 'sit_table_idle_neutral_01', 'sit_table_breathe_01', 'sit_table_idle_touch_hair', 'sit_chair_idle_yawn', 'sit_chair_idle_relaxed_01'],
+    // 立っているとき（いろいろ）
+    m_idle: ['idle_neutral_01', 'idle_look_around_01', 'idle_breathe_02', 'idle_scratch_head_01', 'idle_stretch_arms_01', 'idle_touch_face_01', 'idle_yawn_01', 'cell_phone_textmessage', 'cell_phone_talk_01', 'documents_check', 'drink_drinking', 'gestic_talk_relaxed_01'],
+    f_idle: ['idle_look_around_01', 'idle_look_around_02', 'idle_breathe_02', 'idle_touch_face_01', 'idle_stretch_arms_01', 'cell_phone_textmessage', 'cell_phone_talk_01', 'documents_check', 'drink_drinking', 'gestic_talk_relaxed_01'],
+    // 部長が立ち止まったとき
+    m_boss: ['documents_check', 'documents_check', 'cell_phone_talk_01', 'idle_look_around_01', 'idle_neutral_01', 'idle_scratch_head_01'],
+    f_boss: ['documents_check', 'cell_phone_talk_01', 'idle_look_around_01'],
+    // お店：棚の前（品物を取る・ラベルを見る・スマホでメモを見る・見回す）
+    m_shop: ['work_mid', 'documents_check', 'idle_look_around_01', 'cell_phone_textmessage', 'idle_scratch_head_01', 'idle_neutral_01'],
+    f_shop: ['work_mid', 'documents_check', 'idle_look_around_01', 'idle_look_around_02', 'cell_phone_textmessage', 'idle_touch_face_01'],
+    // 店員（レジでないとき）：品出し・見回す・スマホ
+    m_clerk: ['work_mid', 'work_mid', 'idle_look_around_01', 'idle_neutral_01', 'documents_check', 'idle_stretch_arms_01'],
+    f_clerk: ['work_mid', 'work_mid', 'idle_look_around_01', 'documents_check'],
     m_dance: ['dancing_neutral', 'dancing_cool', 'dancing_silly', 'dancing_aggressive', 'cheer_01', 'cheer_03'],
     f_dance: ['dancing_neutral', 'dancing_cool', 'dancing_silly', 'dancing_affective', 'cheer_01', 'cheer_02']
   };
@@ -5755,7 +5797,7 @@ window.updateOuterStagesAnimation = function(t, st) {
       r.recent.push(r.idle);
       if (r.recent.length > 2) r.recent.shift();
       var c = clip(npc, r.idle);
-      r.until = t + Math.max(c.duration, 4) * (1 + Math.random() * 0.6);
+      r.until = t + Math.max(c.duration, 4) * (0.8 + Math.random() * 1.2) * quirk(npc).linger;
     }
     return { key: poolName + ':' + r.idle, clips: [clip(npc, r.idle)] };
   }
@@ -5773,13 +5815,16 @@ window.updateOuterStagesAnimation = function(t, st) {
       g.rotation.y = cfg.stopFacing !== undefined ? cfg.stopFacing : (w.dir > 0 ? Math.PI / 2 : -Math.PI / 2);
       return 'stop';
     }
-    w.x += w.dir * cfg.speed * dt;
+    var q = quirk(npc);
+    w.x += w.dir * cfg.speed * q.pace * dt;
     var atEnd = (w.dir > 0 && w.x >= cfg.max) || (w.dir < 0 && w.x <= cfg.min);
     if (atEnd || t > w.nextStop) {
       w.x = Math.max(cfg.min, Math.min(cfg.max, w.x));
       if (atEnd || Math.random() < 0.5) w.dir = -w.dir;
-      w.stopUntil = t + 3 + Math.random() * 5;
-      w.nextStop = w.stopUntil + 4 + Math.random() * 8;
+      // 立ち止まる長さ・次に止まるまでの長さは毎回ばらばら（人ごとのくせも入れる）
+      w.stopUntil = t + (2 + Math.random() * 8) * q.linger;
+      w.nextStop = w.stopUntil + 2 + Math.random() * 10;
+      r.idle = null;   // 止まったら、そのたびに別の動きを選ぶ
     }
     g.position.set(w.x, 0, cfg.z);
     g.rotation.y = w.dir > 0 ? Math.PI / 2 : -Math.PI / 2;
@@ -5809,6 +5854,10 @@ window.updateOuterStagesAnimation = function(t, st) {
     }
     r.sambaPos = null;
 
+    // 最初にいた場所（その近くを歩きまわる）
+    if (!r.home) r.home = { x: g.position.x, z: g.position.z, ry: g.rotation.y };
+    var q = quirk(npc);
+
     switch (r.role) {
       case 'desk':
         if (r.reaction === 'angry') {
@@ -5816,27 +5865,45 @@ window.updateOuterStagesAnimation = function(t, st) {
           r.dz = -0.32;
           return rotate(npc, 'angry', t);
         }
-        return rotate(npc, 'sit', t);
+        // パソコンの作業が中心で、ときどき伸び・見回す・頭をかく
+        return rotate(npc, 'desk', t);
 
       case 'boss':
         if (r.reaction === 'angry') return rotate(npc, 'angry', t);
         if (patrol(npc, t, dt, { min: -2.2, max: 2.2, z: -1.25, speed: 0.7 }) === 'walk') {
-          return { key: 'walk', clips: [clip(npc, 'walk_stroll_01')], speed: 0.7 / 0.85 };
+          return { key: 'walk', clips: [clip(npc, 'walk_stroll_01')], speed: 0.7 * q.pace / 0.85 };
         }
-        return rotate(npc, 'look', t);
+        // 立ち止まったら、書類を見る・電話・見回す などを毎回ちがう順番で
+        return rotate(npc, 'boss', t);
 
       case 'clerk':
         if (r.reaction === 'shock') return { key: 'shock', clips: [clip(npc, sg === 'shop_cracker' ? 'claphands_01' : 'idle_nervous_03')] };
-        if (st.superPhase === 'register') return { key: 'scan', clips: [clip(npc, 'work_mid')] };
-        return rotate(npc, 'look', t);
+        if (st.superPhase === 'register') {
+          // レジ：自分の場所に戻ってバーコードを通す
+          g.position.set(r.home.x, 0, r.home.z); g.rotation.y = r.home.ry; r.walk = null;
+          return { key: 'scan', clips: [clip(npc, 'work_mid')] };
+        }
+        // レジがひまなときは、カウンターにそって少し歩き、品出し・見回すなど
+        if (patrol(npc, t, dt, { min: r.home.x - 0.6, max: r.home.x + 0.6, z: r.home.z, speed: 0.45, stopFacing: r.home.ry }) === 'walk') {
+          return { key: 'walk', clips: [clip(npc, 'walk_stroll_01')], speed: 0.45 * q.pace / 0.85 };
+        }
+        return rotate(npc, 'clerk', t);
 
       case 'cart':
         if (r.reaction === 'shock') return { key: 'shock', clips: [clip(npc, sg === 'shop_cracker' ? 'claphands_01' : 'gestic_talk_nervous_01')] };
         if (patrol(npc, t, dt, { min: -2.6, max: 2.6, z: 0.15, speed: 0.55, stopFacing: Math.PI }) === 'walk') {
           // 足は歩き、腕はカートの持ち手を握ったまま
-          return { key: 'cartwalk', clips: [part(clip(npc, 'walk_neutral_01'), false), part(clip(npc, 'trolley_talk'), true)], speed: 0.55 / 0.95 };
+          return { key: 'cartwalk', clips: [part(clip(npc, 'walk_neutral_01'), false), part(clip(npc, 'trolley_talk'), true)], speed: 0.55 * q.pace / 0.95 };
         }
         return { key: 'cartstop', clips: [clip(npc, 'trolley_talk')] };
+
+      case 'browse':
+        if (r.reaction === 'shock') return { key: 'shock', clips: [clip(npc, sg === 'shop_cracker' ? 'claphands_01' : 'idle_nervous_03')] };
+        // 棚の前を行ったり来たりして、止まったら品物を取る・ラベルを見る・スマホ など
+        if (patrol(npc, t, dt, { min: r.home.x - 1.1, max: r.home.x + 1.1, z: r.home.z, speed: 0.5, stopFacing: r.home.ry }) === 'walk') {
+          return { key: 'walk', clips: [clip(npc, 'walk_stroll_01')], speed: 0.5 * q.pace / 0.85 };
+        }
+        return rotate(npc, 'shop', t);
 
       case 'walker':
         // 歩道を歩く速さ（stages3d の動きより遅くして、歩きの足運びに合わせる）
@@ -9170,13 +9237,15 @@ animateLoop();
     var res = baseUpdate ? baseUpdate.apply(this, arguments) : undefined;
     if (st.cameraStage !== 'CAR') return res;
     var spd = refs.carSpeedCurrent || 0;
-    C.ownWheels.forEach(function(w) { w.rotation.x -= spd / WHEEL_R; });
-    C.wheels.forEach(function(w) { w.rotation.x -= (spd + 0.36) / WHEEL_R; });
+    var fsc = window.FRAME_SCALE || 1;
+    C.ownWheels.forEach(function(w) { w.rotation.x -= spd * fsc / WHEEL_R; });
+    C.wheels.forEach(function(w) { w.rotation.x -= (spd + (window.ONCOMING_SPEED || 0.15)) * fsc / WHEEL_R; });
     // 対向車は少し揺らす（車の振動）
     refs.oncomingCars.forEach(function(oc, i) { if (oc.userData.body) oc.userData.body.position.y = Math.sin(t * 9 + i) * 0.004; });
     if (t - lastMeter > 0.2) {
       lastMeter = t;
-      drawMeter(spd * 30 * 3.6 * 0.95, t);
+      // 速さは60コマの1フレームあたりの m なので、×60 で m/秒、×3.6 で時速
+      drawMeter(spd * 60 * 3.6, t);
     }
     // 古い箱の運転席が、ほかの処理で出てこないようにする
     if (oldCabin.visible) oldCabin.visible = false;
@@ -11766,7 +11835,8 @@ animateLoop();
 
     switch (st.pose) {
       case 'walk':
-        return one(st.cameraStage === 'SUPER' || emo === 'panic' ? 'walk_neutral_01' : 'walk_slow_01');
+        // お店でも家と同じゆっくりした歩き方（あわてているときだけ速い歩き方）
+        return one(emo === 'panic' ? 'walk_neutral_01' : 'walk_slow_01');
       case 'feed_churu':
         return one('crouch_idle');
       case 'open_door':
@@ -11934,7 +12004,7 @@ animateLoop();
       // この動き本来の速さ（m/秒）＝ 1回の動きで進む距離 × 体の大きさ ÷ 長さ
       var bip = R.bones['Bip01'], sc = bip && bip.parent ? bip.parent.getWorldScale(tmpScale).z : 1;
       var nat = u.walkTravel * sc / c.duration;
-      var moving = st.pathQueue && st.pathQueue.length > 0;
+      var moving = st.pose === 'walk' || st.pose === 'vacuum';
       var spd = moving ? ((st.emotion === 'panic' ? window.WALK_SPEED_PANIC : window.WALK_SPEED) || 0.0105) * 60 * (window.FRAME_SCALE || 1) : nat;
       a.timeScale = Math.max(0.45, Math.min(1.6, spd / nat));
     });
