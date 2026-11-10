@@ -5,6 +5,27 @@
 <script>
 (function () {
   var API = "https://script.google.com/macros/s/AKfycbzoo0IwxghjQpJYXTlvERQ7g0vr9Qwt-TV3m228bK0udYcDrnD4MnvCwGKPgoyIOKSF/exec";
+  // 観察用（?readonly=1）：配信中のページに影響しないよう、保存・TikTok・AI・音・声・TikFinity の接続をしない。読み込みだけする
+  var READONLY = /[?&]readonly=1/.test(location.search);
+  window.OJISAN_READONLY = READONLY;
+  var READ_OK = { getAssetConfig: 1, loadOjisanData: 1 };
+  if (READONLY) {
+    window.WebSocket = function () { var o = { readyState: 3, send: function () {}, close: function () {} }; return o; };
+    window.WebSocket.OPEN = 1; window.WebSocket.CLOSED = 3;
+    try { window.speechSynthesis.speak = function () {}; } catch (e) {}
+    // このPCの中の仕組み（声を作るソフトなど）にはつながない
+    var of = window.fetch;
+    window.fetch = function (u) { if (/^https?://(localhost|127.0.0.1)/.test(String(u && u.url || u))) return Promise.reject(new Error('readonly')); return of.apply(this, arguments); };
+    try { HTMLMediaElement.prototype.play = function () { return Promise.resolve(); }; } catch (e) {}
+    try { var AC = window.AudioContext || window.webkitAudioContext; if (AC) AC.prototype.resume = function () { return Promise.resolve(); }; } catch (e) {}
+    try { var si = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if (/^ojisan_/.test(k)) return; return si.apply(this, arguments); }; } catch (e) {}
+    document.addEventListener('DOMContentLoaded', function () {
+      var b = document.createElement('div');
+      b.textContent = '観察用（保存・TikTok・AI・音はオフ）';
+      b.style.cssText = 'position:fixed;top:6px;left:50%;transform:translateX(-50%);z-index:99999;background:#b91c1c;color:#fff;font:bold 12px sans-serif;padding:3px 10px;border-radius:6px;pointer-events:none';
+      document.body.appendChild(b);
+    });
+  }
   function runner(ok, ng, user) {
     return new Proxy({}, { get: function (_, name) {
       if (name === 'withSuccessHandler') return function (h) { return runner(h, ng, user); };
@@ -12,6 +33,11 @@
       if (name === 'withUserObject') return function (o) { return runner(ok, ng, o); };
       return function () {
         var args = Array.prototype.slice.call(arguments);
+        if (READONLY && !READ_OK[name]) {
+          // 保存・TikTok の受け取り・AI などは送らない（TikTok は「何もない」と返す）
+          if (name === 'pollTikTokEvents' && ok) setTimeout(function () { ok([], user); }, 0);
+          return;
+        }
         // text/plain にして、事前の確認（プリフライト）なしで GAS に届くようにする
         fetch(API, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ rpc: name, args: args }) })
           .then(function (r) { return r.json(); })
@@ -564,7 +590,7 @@
       <button onclick="setCameraView('front')">👤 おじさんアップ</button>
     </div>
     <!-- 動作の様子（版・1秒に描いた回数・1回の時間・画面の大きさ）：重いときの確認用 -->
-    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 10:27</div>
+    <div id="perfLine" style="font-size:10.5px; color:#94a3b8; margin-top:5px; line-height:1.5;">版 2026-11-10 10:48</div>
     <div class="preset-btns" style="margin-top:4px;">
       <button onclick="jumpTo('weekday', 8, 25)" style="border-color:#38bdf8;">🚗 通勤(車内サイン)</button>
       <button onclick="jumpTo('weekday', 10, 30)" style="border-color:#38bdf8;">🏢 会社オフィス</button>
