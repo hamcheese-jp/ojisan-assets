@@ -557,6 +557,8 @@
       <button onclick="fitMonitorToWindow()">🖥️ 画面いっぱい(自動)</button>
       <button onclick="resizeMonitorForStream(540, 960)">📱 縦型(9:16)</button>
       <button onclick="resizeMonitorForStream(860, 640)">🖥️ 横型(4:3)</button>
+      <button onclick="setRenderFps(30)" title="配信は30コマなので見た目は同じで、PCが軽くなります">🎞️ 30コマ(軽い)</button>
+      <button onclick="setRenderFps(60)">🎞️ 60コマ</button>
       <button onclick="setCameraView('top_down')">🦅 真上俯瞰</button>
       <button onclick="setCameraView('overview')">🏠 斜め全景</button>
       <button onclick="setCameraView('front')">👤 おじさんアップ</button>
@@ -7450,7 +7452,15 @@ var clock = new THREE.Clock();
 // ============================================================================
 // 歩く速さ（60fps の1フレームに進む m）：ふつう 0.0105（約0.63m/秒）、あわてているとき 0.017（約1m/秒）
 var WALK_SPEED = 0.0105, WALK_SPEED_PANIC = 0.017;
-var lastLoopT = null, frameScaleSmooth = 1;
+var lastLoopT = null, frameScaleSmooth = 1, lastRenderT = -1;
+// 1秒に描く回数（30 か 60）。パネルのボタンで切り替え、前の選び方を覚えておく
+window.RENDER_FPS = 30;
+try { var savedFps = +localStorage.getItem('ojisan_render_fps'); if (savedFps === 30 || savedFps === 60) window.RENDER_FPS = savedFps; } catch (e) {}
+window.setRenderFps = function(f) {
+  window.RENDER_FPS = f;
+  try { localStorage.setItem('ojisan_render_fps', String(f)); } catch (e) {}
+  if (window.addLog) window.addLog('🎞️ 画面を1秒に ' + f + ' 回描きます');
+};
 function animateLoop() {
   requestAnimationFrame(animateLoop);
   var t = clock.getElapsedTime();
@@ -7462,6 +7472,14 @@ function animateLoop() {
   window.FRAME_SCALE = frameScaleSmooth;
   lastLoopT = t;
   window.FRAME_NO = (window.FRAME_NO || 0) + 1;
+  // 画面を描くのは1秒に RENDER_FPS 回まで（動き・計算は毎フレーム）。配信は30コマなので30で見た目は同じ、描く仕事は半分
+  var fpsCap = window.RENDER_FPS || 60;
+  var interval = 1 / fpsCap;
+  window.RENDER_THIS_FRAME = (fpsCap >= 60) || (t - lastRenderT >= interval - 0.004);
+  if (window.RENDER_THIS_FRAME) {
+    lastRenderT = (t - lastRenderT > interval * 3) ? t : lastRenderT + interval;
+    if (lastRenderT > t) lastRenderT = t;
+  }
 
   if (!window.RENDER_STARTED) {
     window.RENDER_STARTED = true;
@@ -7772,7 +7790,7 @@ function animateLoop() {
     window.camera.lookAt(lookTarget);
   }
 
-  window.renderer.render(window.scene, window.camera);
+  if (window.RENDER_THIS_FRAME) window.renderer.render(window.scene, window.camera);
 }
 
 // 起動即時初期化
@@ -9086,9 +9104,10 @@ animateLoop();
     // 古い箱の運転席が、ほかの処理で出てこないようにする
     if (oldCabin.visible) oldCabin.visible = false;
 
-    // ミラーに映る後ろの景色（2フレームに1回）
-    frame++;
-    if (frame % 2 === 0) {
+    // ミラーに映る後ろの景色（1秒に約30回）。画面を描くフレームだけ。60コマで描くときは2回に1回
+    var drawNow = window.RENDER_THIS_FRAME !== false;
+    if (drawNow) frame++;
+    if (drawNow && ((window.RENDER_FPS || 60) <= 30 || frame % 2 === 0)) {
       var R = window.OJISAN_REAL;
       var head = R && R.ready && R.bones['Bip01_Head'];
       var face = head ? head.getWorldPosition(tmpV) : tmpV.set(DRIVER_X, 1.18, HIP_Z);
@@ -11929,8 +11948,14 @@ animateLoop();
 
   // ハンドルをにぎる：ハンドルのふちの点（ハンドルの面の上、時計の 10時・2時）へ手首を寄せ、指先がふちを越えるように手を向ける
   // ハンドルの形は car3d.html：半径 0.185m の輪、面は wheelPivot の XY 面。回すと手もいっしょに回る
-  R.WHEEL = { r: 0.185, leftAng: 150, rightAng: 30, toDriver: 0.045, inward: 0.035 };
+  // palm：手のひらの中心を、ふちの管（太さ約2cm）のどれだけ手前（運転手側）に置くか
+  // fingerOut / fingerAway：指先の向き（外向き・向こう向き）の配分。親指はふちに沿って12時の方へ
+  R.WHEEL = { r: 0.185, leftAng: 150, rightAng: 30, palm: 0.022, fingerOut: 0.45, fingerAway: 0.9, curl: 0.85, thumbCurl: 0.5 };
   var wv = new THREE.Vector3(), wn = new THREE.Vector3(), wc = new THREE.Vector3(), wq = new THREE.Quaternion();
+  function palmCenter(s) {
+    var h = W('Bip01_' + s + '_Hand'), m = W('Bip01_' + s + '_Finger2');
+    return h.clone().add(m.sub(h).multiplyScalar(0.7));
+  }
   function gripWheel(wheel, both) {
     wheel.updateMatrixWorld(true);
     wheel.getWorldPosition(wc);
@@ -11944,17 +11969,42 @@ animateLoop();
       var ang = (s === 'L' ? R.WHEEL.leftAng : R.WHEEL.rightAng) * Math.PI / 180;
       wv.set(Math.cos(ang) * R.WHEEL.r, Math.sin(ang) * R.WHEEL.r, 0);
       var rim = wheel.localToWorld(wv.clone());
-      // 手首は、ふちより少し手前（運転手側）・少し内側に置く（手のひらがふちにかぶさる）
       var radial = rim.clone().sub(wc).normalize();
-      var wrist = rim.clone().addScaledVector(wn, R.WHEEL.toDriver).addScaledVector(radial, -R.WHEEL.inward);
-      // ひじは下・外向き
+      // ふちに沿って12時の方へ向かう向き（親指の向き）
+      var tangent = new THREE.Vector3().crossVectors(wn, radial).normalize();
+      var toTop = wheel.localToWorld(new THREE.Vector3(0, R.WHEEL.r, 0)).sub(rim);
+      if (tangent.dot(toTop) < 0) tangent.negate();
+      // 手のひらの中心は、ふちの管のすぐ手前。指はふちの上を外・向こうへ回りこむ
+      var palmGoal = rim.clone().addScaledVector(wn, R.WHEEL.palm);
+      var fingerDir = radial.clone().multiplyScalar(R.WHEEL.fingerOut).addScaledVector(wn, -R.WHEEL.fingerAway).normalize();
       var out = radial.clone(); out.y = 0;
-      reachArm(s, wrist, down.clone().add(out.multiplyScalar(0.8)));
-      // 指先（中指の付け根）が、手首からふちの点の少し先へ向くように手首を回す
+      var pole = down.clone().add(out.multiplyScalar(0.8));
       var hb = R.bones['Bip01_' + s + '_Hand'];
-      var cur = W('Bip01_' + s + '_Finger2').sub(W('Bip01_' + s + '_Hand')).normalize();
-      var want = rim.clone().addScaledVector(wn, -0.02).sub(W('Bip01_' + s + '_Hand')).normalize();
-      rotateWorld(hb, new THREE.Quaternion().setFromUnitVectors(cur, want));
+      var wristGoal = palmGoal.clone();
+      // 腕をのばす → 手の向きを合わせる → 手のひらの中心のずれを直す、を2回くり返す
+      for (var it = 0; it < 2; it++) {
+        reachArm(s, wristGoal, pole);
+        // 指先の向き
+        var cur = W('Bip01_' + s + '_Finger2').sub(W('Bip01_' + s + '_Hand')).normalize();
+        rotateWorld(hb, new THREE.Quaternion().setFromUnitVectors(cur, fingerDir));
+        // 指先の向きを軸に回して、親指側（親指の付け根の方）を12時の方へ
+        var hp = W('Bip01_' + s + '_Hand');
+        var th = W('Bip01_' + s + '_Finger0').sub(hp); th.addScaledVector(fingerDir, -th.dot(fingerDir)).normalize();
+        var tg = tangent.clone().addScaledVector(fingerDir, -tangent.dot(fingerDir)).normalize();
+        var twist = Math.atan2(new THREE.Vector3().crossVectors(th, tg).dot(fingerDir), th.dot(tg));
+        rotateWorld(hb, new THREE.Quaternion().setFromAxisAngle(fingerDir, twist));
+        // 手のひらの中心が目標に来るよう、手首の目標をずらす
+        wristGoal.add(palmGoal.clone().sub(palmCenter(s)));
+      }
+      // 指を曲げてにぎる
+      for (var f = 0; f <= 4; f++) {
+        ['', '1', '2'].forEach(function(seg) {
+          var b = R.bones['Bip01_' + s + '_Finger' + f + seg];
+          if (!b || !b.userData.rest) return;
+          b.quaternion.copy(b.userData.rest);
+          b.rotateOnAxis(R.CURL.axis, R.CURL.sign[s] * (f === 0 ? R.WHEEL.thumbCurl * R.CURL.thumb : R.WHEEL.curl * R.CURL.max));
+        });
+      }
     });
   }
   function curlFingers(prefix, s) {
